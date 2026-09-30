@@ -1,0 +1,31 @@
+#include "at32f425_board.h"
+#include "at32f425_clock.h"
+#include "Application.h"
+#include "DrvInit.h"
+
+void ClockInit() {
+    system_clock_config();
+    /* sfcg */
+    DrvInit::ClockEnable(CRM_SCFG_PERIPH_CLOCK);
+
+    /* gpio clock */
+    DrvInit::ClockEnable(CRM_GPIOA_PERIPH_CLOCK);
+    DrvInit::ClockEnable(CRM_GPIOB_PERIPH_CLOCK);
+    DrvInit::ClockEnable(CRM_GPIOC_PERIPH_CLOCK);
+    DrvInit::ClockEnable(CRM_GPIOD_PERIPH_CLOCK);
+    DrvInit::ClockEnable(CRM_GPIOF_PERIPH_CLOCK);
+    /* usart */
+    DrvInit::ClockEnable(CRM_USART2_PERIPH_CLOCK);
+    DrvInit::ClockEnable(CRM_USART3_PERIPH_CLOCK);
+    DrvInit::ClockEnable(CRM_USART4_PERIPH_CLOCK);
+    /* dma */
+    DrvInit::ClockEnable(CRM_DMA1_PERIPH_CLOCK);
+    /* tmr */
+    DrvInit::ClockEnable(CRM_TMR1_PERIPH_CLOCK);
+}
+
+int main(void) {
+    ClockInit();
+    Application::GetInstance().Start();
+    while (1);
+}
