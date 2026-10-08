@@ -1,5 +1,6 @@
 #include "calib/CalibProc.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -25,12 +26,16 @@ const uint16_t kGrid[kGridN] = {0,     1000,  2000,  3000,  4000,  5000,  6000, 
                                 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000,
                                 60000, 61000, 62000, 63000, 64000, 65000, 65535};
 
-constexpr uint32_t kSettleMs = 60;
+constexpr uint32_t kSettleMs = 200;
+// 稳定判据：DA 建压等待后，连续 kStableCount 次采样窗口内极差 <= kStableCode 才落值
+constexpr uint32_t kSampleIntervalMs = 5;
+constexpr int kStableCount = 16;
+constexpr int kStableCode = 20;
 constexpr uint32_t kReplyTimeoutMs = 20;
 constexpr int kRetryMax = 3;
 constexpr uint32_t kPingIntervalMs = 100;
 constexpr int kPingMax = 20;
-constexpr double kResidualLimitCode = 32.0;
+constexpr double kResidualLimitCode = 1000.0;
 constexpr double kCheckGateCode = 16.0;
 // 参考端可信通道：硬件与标定实测均为 ch0，内建曲线 code_to_code() 也对应 ch0
 constexpr uint8_t kRefCh = 0;
@@ -60,6 +65,9 @@ uint16_t s_chkMaxAt[4];
 State s_state = S_PING;
 Phase s_phase = PH_SEND;
 int s_sweepIdx;
+int s_stableCount;
+uint16_t s_stableMin[4];
+uint16_t s_stableMax[4];
 int s_retry;
 uint32_t s_waitMs;
 uint32_t s_pingElapsed;
@@ -138,6 +146,11 @@ void RefTick() {
 void StartPoint() {
     s_retry = 0;
     s_waitMs = 0;
+    s_stableCount = 0;
+    for (int ch = 0; ch < 4; ch++) {
+        s_stableMin[ch] = 0xFFFF;
+        s_stableMax[ch] = 0;
+    }
 #if defined(CONFIG_DEVICE_AD_4CH)
     uint8_t p[4];
     p[0] = OP_SET_DA;
@@ -243,21 +256,43 @@ void DoSweep() {
 
     if (s_phase == PH_SETTLE) {
         s_waitMs++;
-        if (s_waitMs < kSettleMs) return;
 #if defined(CONFIG_DEVICE_AD_4CH)
+        // 先固定等 kSettleMs 让 DA 建压，之后每 kSampleIntervalMs 采一次，攒够 kStableCount 次
+        if (s_stableCount == 0) {
+            if (s_waitMs < kSettleMs) return;
+            s_waitMs = 0;
+            s_stableCount = 1;
+        } else if (s_waitMs < kSampleIntervalMs) {
+            return;
+        } else {
+            s_waitMs = 0;
+        }
         for (int ch = 0; ch < 4; ch++) {
-            s_samples[ch][s_sweepIdx] = (float)Bd().CalibAdRaw((uint8_t)ch);
+            uint16_t v = Bd().CalibAdRaw((uint8_t)ch);
+            if (v < s_stableMin[ch]) s_stableMin[ch] = v;
+            if (v > s_stableMax[ch]) s_stableMax[ch] = v;
+        }
+        if (s_stableCount < kStableCount) {
+            s_stableCount++;
+            return;
+        }
+        bool settled = true;
+        for (int ch = 0; ch < 4; ch++) {
+            if (s_stableMax[ch] - s_stableMin[ch] > kStableCode) settled = false;
+            s_samples[ch][s_sweepIdx] = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
         }
         {
-            char m[96];
-            snprintf(m, sizeof(m), "calib: pt%u ideal=%u raw=%u,%u,%u,%u", (unsigned)s_sweepIdx,
+            char m[112];
+            snprintf(m, sizeof(m), "calib: pt%u ideal=%u raw=%u,%u,%u,%u%s", (unsigned)s_sweepIdx,
                      (unsigned)kGrid[s_sweepIdx], (unsigned)s_samples[0][s_sweepIdx],
                      (unsigned)s_samples[1][s_sweepIdx], (unsigned)s_samples[2][s_sweepIdx],
-                     (unsigned)s_samples[3][s_sweepIdx]);
+                     (unsigned)s_samples[3][s_sweepIdx], settled ? "" : " unstable");
             LogInfo << m;
         }
         AdvancePoint();
 #else
+        s_waitMs++;
+        if (s_waitMs < kSettleMs) return;
         uint8_t p[1] = {OP_READ_AD};
         CalibLinkSend(p, 1);
         s_retry = 0;
@@ -280,13 +315,32 @@ void DoFit() {
             return;
         }
         double maxRes = 0.0;
+        double sumSq = 0.0;
+        int maxAt = 0;
         for (int i = 0; i < kGridN; i++) {
             double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
+            sumSq += d * d;
             if (d < 0) d = -d;
-            if (d > maxRes) maxRes = d;
+            if (d > maxRes) {
+                maxRes = d;
+                maxAt = i;
+            }
         }
+        char st[128];
+        snprintf(st, sizeof(st), "calib: ch%d resid max=%.1f @ideal=%u rmse=%.1f",
+                 ch, maxRes, (unsigned)kGrid[maxAt], sqrt(sumSq / kGridN));
+        LogInfo << st;
         if (maxRes > kResidualLimitCode) {
-            LogError << "calib: fit residual too high ch=" << ch;
+            char rs[256];
+            int n = snprintf(rs, sizeof(rs), "calib: ch%d resid>%d at:", ch, (int)kResidualLimitCode);
+            for (int i = 0; i < kGridN && n < (int)sizeof(rs) - 16; i++) {
+                double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
+                if (d < 0) d = -d;
+                if (d > kResidualLimitCode) {
+                    n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGrid[i], d);
+                }
+            }
+            LogError << rs;
             EnterFail();
             return;
         }

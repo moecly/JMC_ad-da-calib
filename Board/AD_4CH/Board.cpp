@@ -35,13 +35,6 @@ void Board::HandleData() {
 void Board::OneMsTask() {
     if (m_ad7689Drv) {
         m_ad7689Drv->Sync();
-        static int cnt = 0;
-        cnt++;
-        if (cnt >= 1000) {
-            cnt = 0;
-            const std::array<uint16_t, AD7689Drv::NUM_CHANNELS> adVal = m_ad7689Drv->GetAdData();
-            LogDebug << "out ch0=" << adVal[0] << " ch1=" << adVal[1] << " ch2=" << adVal[2] << " ch3=" << adVal[3];
-        }
     }
 #if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT)
     CalibProcTick();

@@ -33,6 +33,16 @@ void Logger::SetLogLevel(const LogLevel logLevel) {
     m_logLevel = logLevel;
 }
 
+namespace {
+const char* BaseName(const char* path) {
+    const char* base = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    return base;
+}
+}  // namespace
+
 const char* Logger::FormatData(const char* file, const char* function, const int line, const char* message, const Logger::LogLevel logLevel) {
     const int bufferSize = 2048;
     char* buffer = new char[bufferSize];
@@ -63,7 +73,7 @@ const char* Logger::FormatData(const char* file, const char* function, const int
         break;
     }
 
-    snprintf(buffer, bufferSize, "[%s] %s:%d (%s): %s%s", levelStr, file, line, function, message, m_newLine);
+    snprintf(buffer, bufferSize, "[%s] %s:%d (%s): %s%s", levelStr, BaseName(file), line, function, message, m_newLine);
     return buffer;
 }
 
