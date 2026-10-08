@@ -27,7 +27,7 @@ const uint16_t kGrid[kGridN] = {0,     1000,  2000,  3000,  4000,  5000,  6000, 
                                 60000, 61000, 62000, 63000, 64000, 65000, 65535};
 
 constexpr uint32_t kSettleMs = 200;
-// 稳定判据：DA 建压等待后，连续 kStableCount 次采样窗口内极差 <= kStableCode 才落值
+// 稳定判据：DA 建压等待后采 kStableCount 次，窗内极差 > kStableCode 只打 unstable 标记，不中断
 constexpr uint32_t kSampleIntervalMs = 5;
 constexpr int kStableCount = 16;
 constexpr int kStableCode = 20;
