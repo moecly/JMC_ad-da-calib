@@ -10,6 +10,9 @@
 #include "calib/CalibProc.h"
 #endif
 
+// code_to_code 仅由 ch0 实测标定，其余通道无有效换算
+constexpr uint8_t kRefCh = 0;
+
 static inline uint16_t code_to_code(uint16_t raw)
 {
     float x = (float)raw;
@@ -53,7 +56,7 @@ float Board::CalibAdIdeal(uint8_t ch, uint16_t raw) const {
         loaded = true;
         if (!CalibStoreLoad(&rec)) rec.degree = 0;
     }
-    if (rec.degree != POLY_DEGREE) return (float)code_to_code(raw);
+    if (rec.degree != POLY_DEGREE) return (float)(ch == kRefCh ? code_to_code(raw) : raw);
     return (float)PolyEval(rec.coeff[ch], (double)raw);
 }
 #endif

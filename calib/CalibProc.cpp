@@ -37,7 +37,8 @@ constexpr uint32_t kPingIntervalMs = 100;
 constexpr int kPingMax = 20;
 constexpr double kResidualLimitCode = 1000.0;
 constexpr double kCheckGateCode = 16.0;
-// 参考端可信通道：硬件与标定实测均为 ch0，内建曲线 code_to_code() 也对应 ch0
+// 参考端可信通道：硬件与标定实测均为 ch0，内建曲线 code_to_code() 只对 ch0 成立，
+// 无校准记录时非 ch0 通道不做换算（原值直通）
 constexpr uint8_t kRefCh = 0;
 #if defined(CONFIG_CALIB_ROLE_CHK)
 constexpr bool kCheckMode = true;
