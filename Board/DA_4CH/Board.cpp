@@ -4,6 +4,10 @@
 #include "DrvInit.h"
 #include "at32f425_wk_config.h"
 
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+#include "calib/CalibProc.h"
+#endif
+
 static inline uint16_t code_to_code(uint16_t code)
 {
     float x = (float)code;
@@ -35,4 +39,35 @@ void Board::HandleData() {
     // }
 }
 
-void Board::OneMsTask() {}
+void Board::OneMsTask() {
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+    CalibProcTick();
+#endif
+}
+
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+void Board::CalibDaSet(uint8_t ch, uint16_t raw) {
+    switch (ch) {
+        case 0: m_DACS0.SetVal(raw); break;
+        case 1: m_DACS1.SetVal(raw); break;
+        case 2: m_DACS2.SetVal(raw); break;
+        default: m_DACS3.SetVal(raw); break;
+    }
+}
+
+double Board::CalibBuiltinRawFromIdeal(uint16_t ideal) const { return (double)code_to_code(ideal); }
+
+uint16_t Board::CalibDaRaw(uint8_t ch, uint16_t ideal) const {
+    static CalibRecord rec;
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        if (!CalibStoreLoad(&rec)) rec.degree = 0;
+    }
+    if (rec.degree != POLY_DEGREE) return code_to_code(ideal);
+    double y = PolyEval(rec.coeff[ch], (double)ideal);
+    if (y < 0.0) y = 0.0;
+    if (y > 65535.0) y = 65535.0;
+    return (uint16_t)(y + 0.5);
+}
+#endif

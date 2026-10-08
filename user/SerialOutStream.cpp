@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "Rtt.h"
 #include "at32f425_board.h"
 
 #define USE_ISR
@@ -23,8 +24,10 @@ SerialOutStream::~SerialOutStream() {
 }
 
 void SerialOutStream::Write(const char* message) {
-#if defined(USE_ISR)
     if (message == nullptr) return;
+    // RTT 不受串口环形缓冲满与否的影响，也不依赖主循环
+    RttWrite(message, strlen(message));
+#if defined(USE_ISR)
     int tmp = (m_tail + 1) >= MAX_BUF_NUM ? 0 : m_tail + 1;
     if (tmp == m_head) return;
     int strLen = strlen(message);
@@ -33,7 +36,6 @@ void SerialOutStream::Write(const char* message) {
     m_buf[tmp][copyLen] = '\0';
     m_tail = tmp;
 #else
-    if (message == nullptr) return;
     char* p = const_cast<char*>(message);
     while (*p != '\0') {
         while (usart_flag_get(USART4, USART_TDBE_FLAG) == RESET);

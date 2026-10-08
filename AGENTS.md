@@ -1,0 +1,170 @@
+# Repository Guidelines
+
+AT32F425K8T7（Cortex-M4，裸机）多板型工业耦合器模块固件。单仓库同时承载多个硬件板型，通过 CMake 变量在编译期选择板型；应用框架（`user/`）与板级实现（`Board/<BOARD>/`）分层解耦。C/C++ 混编（C99 + C++17）。
+
+## Project Overview
+
+- 目标芯片：AT32F425K8T7，FLASH 64K @ `0x08000000`，RAM 20K @ `0x20000000`（见 `ldscripts/AT32F425x8_FLASH.ld`）。应用区限制为 60K（`LENGTH = 60K`），末扇区 `0x0800F000`（2 KB）留给校准系数存储，格式见 `docs/calibration-flash.md`。
+- 一类板型一个模块：AD 采集（`AD_4CH`，AD7689 SPI ADC）、DA 输出（`DA_4CH`，MS5542 SPI DAC）。
+- 当前状态：`AD_4CH` / `DA_4CH` 驱动与标定在调试中，`Board::HandleData()` 内的数据通路大多被注释；早期模块通信协议（`ModuleComm`）已移除，仅残留于 `user/InterruptCallback.cpp.bak`。
+
+## Architecture & Data Flow
+
+**分层**
+
+1. `firmware/` + `include/libraries/` — AT32 标准外设库 v2（原厂，勿改）。编为静态库 `libat32.a`。
+2. `cmsis/` — 启动汇编与 `SystemInit`，编入 app。
+3. `Board/<BOARD>/` — 板级实现：`Board.h/.cpp` + 传感器/执行器驱动（`AD7689Drv`、`MS5542`）+ AT32 Workbench 生成的 `project/`。
+4. `user/` — 与板型无关的应用框架与通用组件。
+5. `calib/` — 自动校准，仅 `-DCALIB_ROLE=REF|DUT|CHK` 时编入 app：`CalibProc` 状态机、`CalibLink`（USART2 RS485）、`CalibStore`（Flash 记录）、`PolyFit`（最小二乘三次拟合）。
+
+**两处多态**
+
+- 编译期：`-DCONFIG_DEVICE_<BOARD>` → `user/FWConfig.h` 展开 `CONFIG_DEVICE_NAME` / `MODULE_TYPE`。新增板型需在 `FWConfig.h` 增加分支。另有 `-DCALIB_ROLE=APP|REF|DUT|CHK`（默认 `APP`）选择校准角色；非 `APP` 时定义 `CONFIG_CALIB_ROLE_<ROLE>`、编入 `calib/` 源文件，并在产物名追加 `-<ROLE>`。
+- 运行期：`user/BaseBoard.h` 是纯虚接口（`BoardInit()` / `HandleData()` / `OneMsTask()`）；`Board` 类由各板型目录的 `Board.h` 提供；`user/Application.h` 的 `Application : public Board`（Meyer's 单例）在 **应用目标** 里继承它。构建系统为 app 目标加入 `Board/${BOARD}` 作为 include 路径，因此 `#include "Board.h"` 随 `-DBOARD` 解析到不同实现——这是板型选择的关键机制。
+
+**启动与数据流**
+
+```
+main.c (Board/<BOARD>/project/src/)
+  → at32f425_wk_config.c 外设初始化（Workbench 生成）
+  → CPPInterface.h: ApplicationInit()   [extern "C"]
+     → Application::Start() → Init(): ClockInit(96MHz) / PeriphInit / PinInit / TmrInit / BoardInit()
+     → 主循环: SoftTimerLoop() + HandleData()
+     → SerialOutStream::Loop() → USART4
+
+TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsTask()
+             → SoftTimerTick(tick) → 软定时器链表 → Board::OneMsTask()
+```
+
+- 采样链路（AD）：`Board::OneMsTask() → AD7689Drv::Sync()`（SPI1 读取 + 滤波）→ `HandleData()` 取 `GetAdData()` → `code_to_code()` 三次多项式标定 → 输出。
+- 输出链路（DA）：`HandleData() → MS5542::SetVal()`（SPI1 写入，四路独立 CS）。
+- 日志：`LogInfo << "x = " << x;` → `CuteLogger` RAII 临时对象析构时提交 → `Logger` 单例 → `SerialOutStream` 环形缓冲（10×200B）→ 主循环非阻塞发送到 USART4。中断内**不得**直接阻塞写串口，只入队。
+- 板级适配点：`code_to_code()` 是各 `Board.cpp` 内的 `static inline` 多项式校准函数，按板型独立维护；Flash 中存在有效校准记录时，`CalibAdIdeal()` / `CalibDaRaw()` 以记录系数为准，否则回退到该函数。
+
+## Key Directories
+
+| 路径 | 用途 |
+| --- | --- |
+| `user/` | 应用框架：`Application`、`BaseBoard`、`CPPInterface`、`DrvInit`、`BaseTimer`、`SerialOutStream`、`FWConfig.h`、`Clock.c` |
+| `user/{CRC,CuteLogger,Delay,DigitalInFilter,Led,SoftTimer,Timer}/` | 通用组件：日志、软定时器、延时抽象、数字滤波、LED、CRC |
+| `calib/` | 自动校准，仅 `CALIB_ROLE` 非 `APP` 时编入：`CalibProc`（状态机/拟合/落盘/CHK 闭环自检）、`CalibLink`（USART2 RS485 收发热链路）、`CalibStore`（`0x0800F000` 记录读写 + CRC-32）、`PolyFit`（三次多项式最小二乘） |
+| `docs/` | 设计文档：`calibration-flash.md`（校准记录字节布局与系数语义） |
+| `tools/` | PC 端工具，不参与固件编译：`calib_host.py`（RS485 主控，充当校准协议的外部发起方） |
+| `Board/<BOARD>/` | 板级代码：`Board.h/.cpp`、芯片驱动、`project/` |
+| `Board/<BOARD>/project/{inc,src}/` | AT32 Workbench 生成：`main.c`、`at32f425_wk_config.c`、`at32f425_int.c`、`wk_system.c` |
+| `Board/project/` | 新板型模板/存档，**不参与编译**（`BOARD` 从不等于 `project`） |
+| `firmware/` | AT32 标准外设库实现（21 个 `.c`），原厂代码 |
+| `include/` | `at32f425_conf.h`（外设裁剪）、`at32f425_int.h`（中断使能）、`at32f425_clock.h`，以及 `libraries/{drivers/inc,cmsis/cm4}` |
+| `cmsis/` | `startup_at32f425.s`、`system_at32f425.c` |
+| `cmake/gcc.cmake` | `arm-none-eabi-` 工具链定义 |
+| `ldscripts/` | 链接脚本（含 `_Min_Heap_Size=0x3000`、`_Min_Stack_Size=0x400`） |
+| `SVD/` | `AT32F425xx_v2.svd`，调试器寄存器视图 |
+| `build/` | CMake 产物（已 gitignore） |
+
+## Development Commands
+
+```bash
+# 环境（Nix flake 提供 gcc-arm-embedded-15 / cmake / ninja / just）
+direnv allow          # 或 nix develop
+
+# 配置（BOARD = Board/ 下的目录名；BUILD_TYPE = Debug|Release；CALIB_ROLE = APP|REF|DUT|CHK，默认 APP）
+cmake -DBOARD=DA_4CH -DBUILD_TYPE=Debug \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build
+
+# 校准固件（REF = 参考板, DUT = 待校准板, CHK = 仅 DA 侧：自驱 67 点并比对设定值，不写 flash）
+cmake -DBOARD=DA_4CH -DCALIB_ROLE=REF -DBUILD_TYPE=Debug \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build
+
+# 构建
+cmake --build build
+# 产物: build/<BOARD>-Debug-v1.8.elf | build/<BOARD>-v1.8.elf (Release)
+#       CALIB_ROLE 非 APP 时: build/<BOARD>-<ROLE>-Debug-v1.8.elf
+#       build/<BOARD>-*.hex, build/<BOARD>.map
+
+# 闭环精度检查，方案一（两块板 + PC 端脚本；REF 之间不互相发起通信，须由脚本驱动；需 pyserial + USB-RS485 适配器）
+# 若适配器跑不到 6 Mbps，两板 USART2 改 1000000 后加 -b 1000000
+python3 tools/calib_host.py -p /dev/ttyUSB0 ping
+python3 tools/calib_host.py -p /dev/ttyUSB0 read-ad          # 4 路 ideal
+python3 tools/calib_host.py -p /dev/ttyUSB0 sweep --gate 16  # 67 点闭环，门限 16 code
+
+# 闭环精度检查，方案二（无串口：DA_4CH-CHK + 任一块 REF，日志经 RTT 看）
+# CHK 自驱 67 点、逐点打印 d=各通道(measured-set)，结束时打印 4 通道 max |d| 并判 16 code
+cmake -DBOARD=DA_4CH -DCALIB_ROLE=CHK -DBUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build/DA_4CH-CHK
+cmake --build build/DA_4CH-CHK
+just attach build/DA_4CH-CHK/DA_4CH-CHK-Debug-v1.8.elf      # CHK 板；REF 板上电即可（REF 无日志输出）
+
+# 烧录 / 调试（probe-rs，chip=at32f425k8t7）
+just download build/DA_4CH-Debug-v1.8.elf   # 仅烧录
+just run      build/DA_4CH-Debug-v1.8.elf   # 烧录并运行，日志经 RTT 打在终端（无需串口）
+just attach   build/DA_4CH-Debug-v1.8.elf   # 不下载，仅连上看 RTT 日志
+just erase | reset | info
+just watch                                   # watchexec 增量重建
+```
+
+- 版本号在 `CMakeLists.txt` 的 `MAJOR` / `MINOR`，会进入产物文件名与 `CONFIG_*_VERSION` 宏；`FWConfig.h` 有独立兜底默认值，改版本需两处一致。
+- `.vscode/tasks.json` 列出了 8 个板型的 Configure 任务，但多数板型目录已不存在——**以 `Board/` 实际目录为准**。
+- 注意 `.vscode/tasks.json` 被误存为 `develop.md`（同名 JSON 内容），修改任务时勿改错文件。
+
+## Code Conventions & Common Patterns
+
+- 格式化 `.clang-format`：BasedOnStyle Google，`IndentWidth 4`、`ColumnLimit 120`、`AccessModifierOffset -4`。
+- 静态检查 `.clang-tidy`：`bugprone-*`、`cppcoreguidelines-*`、`modernize-*`、`performance-*`、`readability-*`；命名规则要求**变量/函数/参数 `lower_case`**（与现存 `PascalCase` 方法名存在冲突，改代码时不必强行对齐命名检查）。
+- 头文件一律 `#pragma once`。
+- 命名：类 PascalCase（`Application`、`SoftTimer`），成员 `m_` 前缀 + camelCase（`m_oneMsTimer`），全局/桥接函数 PascalCase（`ApplicationInit`、`SoftTimerTick`）。
+- 注释默认不写；仅在 WHY 不明显时加一行，中英混排可接受。
+- C/C++ 边界：对外 C 接口用 `extern "C"`。`main.c` 是 C，只能通过 `CPPInterface.h`（`ApplicationInit` / `SwTmrTick`）进入 C++。
+- 单例：Meyer's `static X& GetInstance()`（`Application`、`Logger`、`SoftTimer`），并常配一层 C 函数包装（`SoftTimerTick`、`AppOneMsTask`、`SoftTimerLoop`）。
+- 外设初始化统一经 `DrvInit` 静态方法（`PinInit` / `Pinmux` / `UartInit` / `DmaInit` / `ClockEnable` / `IrqEnable` / `ExintInit`），不要直接裸调 `at32f425_*.h`，除非在原厂库里。
+- 抽象基类显式虚析构（`BaseBoard`、`Timer`、`Delay`、`OutStreamAbstract`），子类 `override`。
+- 内存：驱动持有者用 `std::unique_ptr`（`AD_4CH` 的 `m_ad7689Drv`）或按值成员（`DA_4CH` 的 `m_DACS0..3`）；`SerialOutStream` 缓冲区为裸 `new[]`，在构造/析构中成对释放。
+- 错误处理：无异常、无错误码，靠 `bool` 返回 + 日志；不写无实际价值的防御代码。
+- 定时任务：TMR1 硬件 1ms 时基 → `SoftTimer` 链表（`ONESHOT` / `PERIOD`）。
+- Workbench 生成文件：用户代码只能写进 `/* add user code begin X */ ... /* add user code end X */` 区段，否则重新生成会被覆盖。
+- 遗留文件 `user/main.cpp.bak`、`user/InterruptCallback.cpp.bak` 不参与编译（glob 只匹配 `.c`/`.cpp`），属旧版参考。
+
+## Important Files
+
+| 文件 | 作用 |
+| --- | --- |
+| `CMakeLists.txt` | 板型矩阵、目标划分（`at32` / `at32_itf` / `app` / exe）、版本号、编译与链接选项 |
+| `cmake/gcc.cmake` | 工具链与自定义 compile/link 命令行 |
+| `Board/<BOARD>/project/src/main.c` | 固件入口（Workbench 生成） |
+| `user/Application.{h,cpp}` | 应用生命周期与主循环，`Board` 的具体子类 |
+| `user/BaseBoard.h` | 板型抽象接口 |
+| `user/CPPInterface.{h,cpp}` | C↔C++ 桥接（`ApplicationInit`、`SwTmrTick`） |
+| `user/FWConfig.h` | 板型宏分发（新增板型必改） |
+| `Board/<BOARD>/Board.h` | 板型声明，被 `Application.h` 按 include 路径解析 |
+| `calib/CalibProc.{h,cpp}` | 校准状态机（PING→扫描→拟合→落盘）、LED 指示；REF/DUT/CHK 行为在此分支 |
+| `calib/CalibLink.{h,cpp}` | USART2 + DMA1_CH1 环形收、阻塞发；帧格式 `0xA5,len,payload,crc32` |
+| `calib/CalibStore.{h,cpp}` | `0x0800F000` 校准记录读写与校验，`CalibCrc()` 共享 CRC-32 实例 |
+| `calib/PolyFit.{h,cpp}` | 三次多项式最小二乘拟合 / Horner 求值 |
+| `docs/calibration-flash.md` | 校准记录字节布局、`board` 语义、CRC 与解码示例 |
+| `tools/calib_host.py` | PC 端 RS485 主控脚本：`ping` / `set-da` / `read-ad` / `sweep`（闭环精度门限） |
+| `user/DrvInit.{h,cpp}` | 外设初始化封装 |
+| `user/SoftTimer/SoftTimer.{h,cpp}` | 软定时器调度 |
+| `user/SerialOutStream.{h,cpp}` | USART4 日志环形缓冲，同时把每条日志拷进 RTT 上行通道 |
+| `user/Rtt.{h,cpp}` | SEGGER RTT 控制块 `_SEGGER_RTT` + 1 KB 无锁上行环形缓冲；日志除 USART4 外走 SWD |
+| `user/BaseTimer.{h,cpp}` / `user/Timer/Timer.h` | 硬件定时器抽象 |
+| `include/at32f425_conf.h` | 外设/中断裁剪开关 |
+| `ldscripts/AT32F425x8_FLASH.ld` | 内存布局与堆栈下限 |
+| `justfile` | 烧录/复位/监视命令 |
+
+## Runtime/Tooling Preferences
+
+- 交叉编译：`arm-none-eabi-gcc`（Nix `gcc-arm-embedded-15`），`-mcpu=cortex-m4 -mthumb -O2`；链接 `--specs=nano.specs -u _printf_float --specs=nosys.specs`、`-s`、`--gc-sections`。
+- `-s` 对所有构建生效，**ELF 一律无符号表**：probe-rs/J-Link 找 `_SEGGER_RTT` 只能扫内存（`--rtt-scan-memory`；J-Link RTT Viewer 勾选 Search / 填地址）。RTT 上行环形缓冲 1024 B，不会因 USART4 缓冲满或主循环卡住而丢行。
+- 构建系统：CMake ≥ 3.13 + Ninja（`CMakeCache.txt` 中 `BOARD` / `BUILD_TYPE` 为 string cache 变量）。
+- `build/` 是**共享**目录：切换 `-DBOARD` 会复用同一目录并残留上一次的产物，干净构建请删除或换目录。
+- `CMakeLists.txt` 的 `APP_INCLUDE` 含硬编码 Windows 路径 `E:/develop/AT32IDE/.../arm-none-eabi/include`（AT32IDE 自带 GCC 内建头）。在 Linux/macOS 下这些路径不存在但仅作 `-I` 传入，不影响构建；新增编译器内建头依赖时不要依赖这些路径。
+- 烧录/调试：probe-rs（`justfile`，chip `at32f425k8t7`，SWD）；`.vscode/launch.json` 另有 probe-rs-debug 与 J-Link cortex-debug 两套配置（其 `programBinary` 仍指向不存在的 `DIG_8IN_8OUT_NPN-Debug-v1.8.elf`，使用前需改）。
+- `.gitignore` 忽略 `.vscode/`、`*.code-workspace`、`build/`、`.direnv/`、`.codegraph/`、`out/`，因此编辑器与工作区配置是本地状态，不要假定他人可见。
+- 仓库同时保留 Eclipse/AT32IDE 元数据（`.project`、`.cproject`、`.settings/`、`preferences.ini`、`*.ATWP`）——仅供原厂 IDE 打开，不是构建链的一部分。
+
+## Testing & QA
+
+- **无测试框架、无 CI、无宿主可运行目标**。不存在 `test/` 目录、Unity/CppUTest/gtest，也没有 `.github/workflows`、`.gitlab-ci.yml`、`Jenkinsfile`。
+- 唯一的质量门是构建成功 + 静态检查配置（`.clang-tidy` 已配置但未接入自动化流水线；`cppcheck` 无配置）。
+- 验证手段只能是硬件在环：`cmake --build build` → `just run <elf>` → 通过 USART4 日志（`LogInfo`/`LogTrace`）与 SWD 调试观察行为。改动驱动/标定/定时逻辑后，必须说明需要哪块板卡验证。
+- 提交前最低要求：该板型 Debug 与 Release 均能构建通过，且 `.hex` 正常生成。
+- 发布约定：`README.md` 追加一行版本说明（历史格式 `V1.00 初版, 实现了...`），同步 `CMakeLists.txt` 的 `MAJOR`/`MINOR`。

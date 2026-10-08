@@ -6,6 +6,10 @@
 #include "CuteLogger/CuteLogger.h"
 #include "DrvInit.h"
 
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT)
+#include "calib/CalibProc.h"
+#endif
+
 static inline uint16_t code_to_code(uint16_t raw)
 {
     float x = (float)raw;
@@ -31,6 +35,33 @@ void Board::HandleData() {
 void Board::OneMsTask() {
     if (m_ad7689Drv) {
         m_ad7689Drv->Sync();
+        static int cnt = 0;
+        cnt++;
+        if (cnt >= 1000) {
+            cnt = 0;
+            const std::array<uint16_t, AD7689Drv::NUM_CHANNELS> adVal = m_ad7689Drv->GetAdData();
+            LogDebug << "out ch0=" << adVal[0] << " ch1=" << adVal[1] << " ch2=" << adVal[2] << " ch3=" << adVal[3];
+        }
     }
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT)
+    CalibProcTick();
+#endif
 }
+
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT)
+uint16_t Board::CalibAdRaw(uint8_t ch) const { return m_ad7689Drv->GetAdData()[ch]; }
+
+double Board::CalibBuiltinIdealFromRaw(uint16_t raw) const { return (double)code_to_code(raw); }
+
+float Board::CalibAdIdeal(uint8_t ch, uint16_t raw) const {
+    static CalibRecord rec;
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        if (!CalibStoreLoad(&rec)) rec.degree = 0;
+    }
+    if (rec.degree != POLY_DEGREE) return (float)code_to_code(raw);
+    return (float)PolyEval(rec.coeff[ch], (double)raw);
+}
+#endif
 

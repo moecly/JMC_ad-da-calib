@@ -18,6 +18,8 @@ bool AD7689Drv::Init() {
     gpio_bits_reset(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
     spi_i2s_data_transmit(m_spi, RetCfgVal(ADREG_CFG, ADREG_INCC, 6, ADREG_BW, ADREG_REF, ADREG_SEQ, ADREG_RB));
     while (spi_i2s_flag_get(m_spi, SPI_I2S_RDBF_FLAG) == 0);
+    // 必须读走 RX 才能清 RDBF，否则后续 while(RDBF==0) 立即通过，CNV 会在帧未结束时提前拉高
+    (void)spi_i2s_data_receive(m_spi);
     gpio_bits_set(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
     m_delay->DelayMs(1);
 
@@ -25,16 +27,14 @@ bool AD7689Drv::Init() {
     gpio_bits_reset(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
     spi_i2s_data_transmit(m_spi, RetCfgVal(ADREG_CFG, ADREG_INCC, 6, ADREG_BW, ADREG_REF, ADREG_SEQ, ADREG_RB));
     while (spi_i2s_flag_get(m_spi, SPI_I2S_RDBF_FLAG) == 0);
+    (void)spi_i2s_data_receive(m_spi);
     gpio_bits_set(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
     m_delay->DelayMs(1);
     return true;
 }
 
 bool AD7689Drv::Sync() {
-    // uint16_t readVal = 0;
-    // uint16_t cfg = RetCfgVal(ADREG_CFG, ADREG_INCC, 0, ADREG_BW, ADREG_REF, ADREG_SEQ, ADREG_RB);
-
-    // channel 0
+    // CFG 滞后两个转换窗口：本帧读到的数据属于两帧前写入的通道（手册 one deep delay）
     static int cnt = 0;
     static int cnt1 = 0;
     // static int cnt2 = 0;
@@ -50,7 +50,7 @@ bool AD7689Drv::Sync() {
         // m_delay->DelayUs(50);
         spi_i2s_data_transmit(m_spi, RetCfgVal(ADREG_CFG, ADREG_INCC, 2, ADREG_BW, ADREG_REF, ADREG_SEQ, ADREG_RB));
         while (spi_i2s_flag_get(m_spi, SPI_I2S_RDBF_FLAG) == 0);
-        // readVal is channel 4
+        // m_filterData[3] <- IN7
 #if 0
         m_readADData[3] = spi_i2s_data_receive(m_spi);
 #else
@@ -60,14 +60,13 @@ bool AD7689Drv::Sync() {
         gpio_bits_set(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
     }
 
-    // channel 2
     if (cnt == 1) {
         while (spi_i2s_flag_get(m_spi, SPI_I2S_TDBE_FLAG) == 0);
         gpio_bits_reset(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
         // m_delay->DelayUs(50);
         spi_i2s_data_transmit(m_spi, RetCfgVal(ADREG_CFG, ADREG_INCC, 5, ADREG_BW, ADREG_REF, ADREG_SEQ, ADREG_RB));
         while (spi_i2s_flag_get(m_spi, SPI_I2S_RDBF_FLAG) == 0);
-        // readVal is channel 6
+        // m_filterData[0] <- IN0
 #if 0
         m_readADData[0] = spi_i2s_data_receive(m_spi);
 #else
@@ -77,14 +76,13 @@ bool AD7689Drv::Sync() {
         gpio_bits_set(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
     }
 
-    // channel 4
     if (cnt == 2) {
         while (spi_i2s_flag_get(m_spi, SPI_I2S_TDBE_FLAG) == 0);
         gpio_bits_reset(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
         // m_delay->DelayUs(50);
         spi_i2s_data_transmit(m_spi, RetCfgVal(ADREG_CFG, ADREG_INCC, 7, ADREG_BW, ADREG_REF, ADREG_SEQ, ADREG_RB));
         while (spi_i2s_flag_get(m_spi, SPI_I2S_RDBF_FLAG) == 0);
-        // readVal is channel 0
+        // m_filterData[1] <- IN2
 #if 0
         m_readADData[1] = spi_i2s_data_receive(m_spi);
 #else
@@ -95,13 +93,12 @@ bool AD7689Drv::Sync() {
     }
 
     if (cnt == 3) {
-        // channel 6
         while (spi_i2s_flag_get(m_spi, SPI_I2S_TDBE_FLAG) == 0);
         gpio_bits_reset(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
         // m_delay->DelayUs(50);
         spi_i2s_data_transmit(m_spi, RetCfgVal(ADREG_CFG, ADREG_INCC, 0, ADREG_BW, ADREG_REF, ADREG_SEQ, ADREG_RB));
         while (spi_i2s_flag_get(m_spi, SPI_I2S_RDBF_FLAG) == 0);
-        // readVal is channel 2
+        // m_filterData[2] <- IN5
 #if 0
         m_readADData[2] = spi_i2s_data_receive(m_spi);
 #else

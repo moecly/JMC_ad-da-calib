@@ -5,6 +5,10 @@
 #include "at32f425_board.h"
 #include "at32f425_clock.h"
 
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+#include "calib/CalibProc.h"
+#endif
+
 Application::Application(Logger::LogLevel level)
     : m_oneMsTimer(new BaseTimer(TMR1)),
       m_irqState(true) {
@@ -30,6 +34,7 @@ void Application::Start() {
         m_serialOutStream.Loop();
 #endif
         SoftTimerLoop();
+        HandleData();
     }
 }
 
@@ -41,6 +46,9 @@ void Application::Init() {
     BoardInit();
     TmrInit();
     EnableIrq();
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+    CalibProcInit();
+#endif
     LogInfo << "Init success";
 }
 

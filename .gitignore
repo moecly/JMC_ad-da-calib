@@ -9,6 +9,7 @@ bin/
 
 *.d 
 *.o
+__pycache__/
 *-bootloader-v*
 *.jlink
 *.launch

@@ -10,6 +10,8 @@ set(BUILD_TYPE "Debug" CACHE STRING "Build type (Debug / Release)")
 set(MAJOR 1)
 set(MINOR 8)
 
+set(CALIB_ROLE "APP" CACHE STRING "Calibration role (APP / REF / DUT)")
+
 set(LIB at32)
 set(LIB_ITF at32_itf)
 
@@ -23,12 +25,16 @@ add_library(app OBJECT "")
 target_link_libraries(${LIB} PUBLIC ${LIB_ITF})
 target_link_libraries(app PRIVATE ${LIB})
 if (BUILD_TYPE STREQUAL "Release")
-  set(PROJECT_NAME "${BOARD}-v${MAJOR}.${MINOR}")
-  set(PROJECT_EXEC_NAME ${PROJECT_NAME}.elf)
+  set(VERSION_SUFFIX "v${MAJOR}.${MINOR}")
 else()
-  set(PROJECT_NAME "${BOARD}-${BUILD_TYPE}-v${MAJOR}.${MINOR}")
-  set(PROJECT_EXEC_NAME ${PROJECT_NAME}.elf)
+  set(VERSION_SUFFIX "${BUILD_TYPE}-v${MAJOR}.${MINOR}")
 endif()
+if (CALIB_ROLE STREQUAL "APP")
+  set(PROJECT_NAME "${BOARD}-${VERSION_SUFFIX}")
+else()
+  set(PROJECT_NAME "${BOARD}-${CALIB_ROLE}-${VERSION_SUFFIX}")
+endif()
+set(PROJECT_EXEC_NAME ${PROJECT_NAME}.elf)
 add_executable(${PROJECT_EXEC_NAME} $<TARGET_OBJECTS:app>)
 target_link_libraries(${PROJECT_EXEC_NAME} PRIVATE app)
 
@@ -55,6 +61,9 @@ set(AT32_DEFINED
     USE_STDPERIPH_DRIVER
 )
 target_compile_definitions(${LIB_ITF} INTERFACE ${AT32_DEFINED})
+if (NOT CALIB_ROLE STREQUAL "APP")
+  target_compile_definitions(${LIB_ITF} INTERFACE "CONFIG_CALIB_ROLE_${CALIB_ROLE}")
+endif()
 if(BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(${LIB_ITF} INTERFACE "DEBUG")
 elseif(BUILD_TYPE STREQUAL "Release")
@@ -81,10 +90,16 @@ file(GLOB_RECURSE APP_SOURCE
 )
 target_sources(app PRIVATE ${APP_SOURCE})
 
+if (NOT CALIB_ROLE STREQUAL "APP")
+  file(GLOB_RECURSE CALIB_SOURCE ${CMAKE_SOURCE_DIR}/calib/*.cpp)
+  target_sources(app PRIVATE ${CALIB_SOURCE})
+endif()
+
 set(APP_INCLUDE
     ${CMAKE_SOURCE_DIR}/Board/${BOARD}/project/inc
     ${CMAKE_SOURCE_DIR}/Board/${BOARD}
     ${CMAKE_SOURCE_DIR}/user/
+    ${CMAKE_SOURCE_DIR}
 
     # GCC INCLUDE
     E:/develop/AT32IDE/platform/tools/gcc-arm-none-eabi-10.3-2021.10/arm-none-eabi/include
