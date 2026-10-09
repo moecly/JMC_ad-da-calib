@@ -30,6 +30,11 @@ bool AD7689Drv::Init() {
     (void)spi_i2s_data_receive(m_spi);
     gpio_bits_set(AD_SPI_CS_GPIO_PORT, AD_SPI_CS_PIN);
     m_delay->DelayMs(1);
+    // 预热盒式滤波器：m_filterData 未初始化，GetAveragerVal 会把 RAM 残留当有效样本平均，
+    // 首个采样点因此偏离真值（实测 pt0 raw=32 而真值 201）。跑满 FILTER_NUM 圈把 32 槽全部填上真实采样
+    for (int i = 0; i < FILTER_NUM * 4; i++) {
+        Sync();
+    }
     return true;
 }
 
@@ -145,7 +150,6 @@ bool AD7689Drv::Sync() {
 }
 
 std::array<uint16_t, AD7689Drv::NUM_CHANNELS> AD7689Drv::GetAdData() const {
-    std::array<uint16_t, AD7689Drv::NUM_CHANNELS> adData = m_readADData;
     return m_readADData;
 }
 

@@ -141,7 +141,7 @@ just watch                                   # watchexec 增量重建
 - 定时任务：TMR1 硬件 1ms 时基 → `SoftTimer` 链表（`ONESHOT` / `PERIOD`）。
 - Workbench 生成文件：用户代码只能写进 `/* add user code begin X */ ... /* add user code end X */` 区段，否则重新生成会被覆盖。
 - 遗留文件 `user/main.cpp.bak`、`user/InterruptCallback.cpp.bak` 不参与编译（glob 只匹配 `.c`/`.cpp`），属旧版参考。
-- 已踩过的坑：`CuteLogger` 曾为每条日志 `new[]`/`delete[]` 一次 1 KB 缓冲（RAII 临时对象，高频日志下堆碎片严重），已改为内嵌定长 `kMessageSize=256` 栈缓冲；`MS5542` 构造函数内 `SetVal(0)` 必须在 `m_delay` 初始化**之后**调用，否则 `DelayUs()` 解引用空 `unique_ptr` 直接 HardFault。构造体内成员初始化顺序即使用顺序，先 `make_unique` 再使用。
+- `AD7689Drv::m_filterData` 是盒式滤波器环形槽但从未初始化，`GetAveragerVal` 对全部 `FILTER_NUM` 槽求平均：上电后第一圈未填满时均值混入 RAM 残留，首个采样点可偏离真值 ~170 码（实测 `pt0 raw=32` 而真值 201），被三次拟合吸收后整条低段系统性偏移、复检期才暴露。`Init()` 末尾跑 `FILTER_NUM*4` 次 `Sync()` 预热，槽填满后计数器自然回绕到 0。
 
 ## Important Files
 
@@ -187,14 +187,13 @@ just watch                                   # watchexec 增量重建
 - **无测试框架、无 CI、无宿主可运行目标**。不存在 `test/` 目录、Unity/CppUTest/gtest，也没有 `.github/workflows`、`.gitlab-ci.yml`、`Jenkinsfile`。
 - 唯一的质量门是构建成功 + 静态检查配置（`.clang-tidy` 已配置但未接入自动化流水线；`cppcheck` 无配置）。
 - 验证手段只能是硬件在环：`cmake --build build` → `just run <elf>` → 通过 USART4 日志（`LogInfo`/`LogTrace`）与 SWD 调试观察行为。改动驱动/标定/定时逻辑后，必须说明需要哪块板卡验证。
-- AD 标定实测（AD_4CH=DUT, DA_4CH=REF）：**根因已定位为 REF 的 MS5542 在局部码段输出不可重复**，证据链如下。
-  - **排除 DUT 采集侧**：`code_to_code()`（`Board/DA_4CH/Board.cpp:17`）曲线在问题段斜率平滑单调（19000~21000 段 993.57→993.51，无凸起）；REF 的 `calib: set_da raw=` 序列严格单调（ideal+1000 ⇒ raw+993/994，无跳变无重复）。⇒ 写给 MS5542 的码正确。
-  - **定位到 MS5542 输出**：对复检期 raw（= 真实 DA 传递特性）做三次最小二乘拟合，残差**只在局部码段有凸起**，其余全部点 ≤ 27 码（实测：19000 −106、20000 +90、21000 −59、22000 +25，其余 max 27）。
-  - **凸起不可重复**：两次运行间隔 3 min，凸起位置完全不同（一次在 19000~21000，一次在 24000~27000）。⇒ 不是 MS5542 的确定性非线性，是同一码段多次输出不一致。
-  - **凸起形态固定**：符号交替、幅度衰减（`−115, +87, −66, +21, −10`），是「局部脉冲」经三次拟合后的残差响应——三次多项式只有 4 个自由度，无法同时拟合局部凸起与全局趋势，残差溢出到相邻点。
-  - **该次运行其余点 |d| ≤ 15**：局部凸起主导整个残差（max 115 vs 其余 ≤ 25）。
-  - **已用硬件数据排除的假设**：建压时间（`kSettleMs` 200→600 反而更差）；AD 盒式窗过渡带（`FILTER_NUM` 32→4 无改善）；通道轮转/`t_ACQ`（单通道连发绕过 4 ms 轮转无改善）；REF ACK 时序（ACK 在 `CalibDaSet()` 之后才发）；拟合方向与系数（离线逐位复算一致）；SPI 位/CFG 布局（对照 AD7689 手册 Table 13 逐位核对正确）；AD7689 内部 REF（凸起形态是局部码段而非全量程乘性偏移，四通道同步仅因输入电压相同）。
-  - **残差门限**：`kResidualLimitCode` 当前为 1000（仅保证落盘），实测残差 25~170 码；`kCheckGateCode=16` 的复检必然 FAIL。根因在 MS5542 硬件侧，固件无法消除；应收紧落盘门限（建议 max≈120 / rmse≈40 双判据）避免坏系数落盘，或改用分段/更高次拟合吸收局部凸起。
+- AD 标定实测（AD_4CH=DUT, DA_4CH=REF）：**残差与 AD/DA 通道对应关系直接相关**，实测证据如下。
+  - **实测对照**：4 个 AD 通道共接 1 个 DA 输出时 `ch1 resid max=28875 @58000 rmse=15436`、低段残差呈 `12500→28125` 线性递减（ch0 反而 `resid max=1.5 @37000 rmse=0.5`）；改为只接 1 路 AD 后 `resid max=1.5 / rmse=0.5`。非 ch0 通道的 ideal→raw 映射本来就只对 `kRefCh=0` 成立（无校准记录时 `CalibDaRaw` 对非 ch0 原值直通），共接时这些通道采到的不是自己被驱动的电压。
+  - **共接与此前诡异现象相符（未做排除性验证，仅为假设）**：四通道同号同步的 ~160 码跳变（DA 输出缓冲的负载瞬变同时作用于 4 路）、跳变位置逐次运行随机且扫描期与复检期不重合、`kSettleMs` 加大反而更差、`FILTER_NUM` 改小无改善。
+  - **正确接法**：标定时 DUT 每个 AD 通道必须各自接到 REF 的一个独立 DA 通道；只想验证单路时只接 `kRefCh` 对应的那一路。共接时非 `kRefCh` 通道的残差会大得离谱（实测 28875 码 ≈ 44% FS），`DoFit` 对首个超 `kResidualLimitCode` 的通道 `EnterFail()` 后直接返回，不落盘任何系数——这是设计行为，看到这种量级先查接线，不要调门限。
+  - **顺带修复的独立缺陷**：`AD7689Drv::m_filterData` 从未初始化，`GetAveragerVal` 对全部 32 槽求平均，上电后第一圈（128 ms）未填满时均值混入 RAM 残留。同一次运行 `pt0 ideal=0 raw=32`，而复检同一 `set=0` 的 `vfy0 raw=201`（两次 DA 都是 0）；把 pt0 从 32 改成 201 后离线重拟合，复检低段 d 从 `+41.4/+34.5/+29.3/+17.8`（ideal 0/1000/2000/5000）降到 `+3.3/+1.0/−0.3/−1.6`。修复：`Init()` 末尾跑 `FILTER_NUM*4` 次 `Sync()` 预热，槽填满后 `cnt1` 自然回绕到 0。
+  - **已用硬件数据排除的假设**：建压时间（`kSettleMs` 200→600 反而更差）；AD 盒式窗深度（`FILTER_NUM` 32→4 无改善）；通道轮转/`t_ACQ`（单通道连发绕过 4 ms 轮转无改善）；REF ACK 时序（ACK 在 `CalibDaSet()` 之后才发）；拟合方向与系数（离线逐位复算一致）；SPI 位/CFG 布局（对照 AD7689 手册 Table 13 逐位核对正确）；扫描/复检两段 `PH_SETTLE` 逐行对比一致；`s_stableCount`/`s_stableMin/Max` 初值一致；`s_rec.coeff` 与 `s_coeff` 同源（`DoSave` 只读不改）；`CalibLink` 环形缓冲与 CRC；`code_to_code()` 曲线（问题段斜率平滑单调）。
+  - **残差门限**：`kResidualLimitCode` 当前为 1000（仅保证落盘），`kCheckGateCode=16` 是复检门限。单路正确接法下实测 `resid max=1.5 / rmse=0.5`，远小于门限；若实测残差仍到几十~上百码，先查 AD/DA 通道是否一一对应，不要先调门限。
   - 定位工具已内置（编译开关，默认关闭，均在 `CMakeLists.txt` 定义为 cache 变量并经 `target_compile_definitions` 传入）：`-DCALIB_LOG_SPAN=1` 让 DUT 在扫描段每点 `calib: pt…` 后追加 `calib: span%u min=… max=…`、在复检段每点 `calib: vfy…` 后追加 `calib: vspan%u min=… max=…`（四通道各自的窗内 min/max，用于判断「电平在窗内是否稳定」）；`-DCALIB_FIXED_IDEAL=<code>` 把 67 点全钉在该 ideal 上驻留（分离「施加不稳」与「采集不稳」）；`-DCALIB_SETTLE_MS=<ms>` 覆盖 `kSettleMs`；`-DAD_FILTER_NUM=<n>` 覆盖 `AD7689Drv::FILTER_NUM`（盒式窗深度）；`-DAD_BURST_SAMPLE=1` 让 `Sync()` 改走 `ReadOneChannelData()`（每通道连发 3 帧、间隔 1 ms，绕过 4 ms 轮转）。REF 侧 `OP_SET_DA` 恒打印 `calib: set_da ch= ideal= raw=`（REF 实际写给 MS5542 的码）。
 - DUT 写盘后复检（`S_VERIFY`）：用刚写入 Flash 的记录重跑 67 点闭环，每点打印 `vfy set=… d=…`，末尾 `verify ch%d max=… @set=… rmse=…` + 超 `kCheckGateCode`(16) 点清单 + `PASS`/`FAIL`。仅出日志结论，**不回滚系数**（FAIL 不擦 Flash、不改 LED）。复检 `max` 略高于扫描 `resid`（实测 164 vs 133）属训练误差→泛化误差的正常增量。`CONFIG_VERIFY_ON_BOOT` 可让上电即复检。
 - `S_DUMP` 导出：每次 tick 发一行、行间 `kLineGapMs=100`，19 行（grid 3 + ch0..3 各 3 + coeff 4）约 1.9 s。**必须节流**——RTT 上行环缓仅 1024 B，一次性发完会被主机读取速率限制而丢字节（见 Runtime/Tooling 的 RTT 条目）。
