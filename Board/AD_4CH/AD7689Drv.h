@@ -10,7 +10,11 @@
 class AD7689Drv {
 public:
     static constexpr int NUM_CHANNELS = 4;
+#if defined(AD_FILTER_NUM)
+    static constexpr int FILTER_NUM = AD_FILTER_NUM;
+#else
     static constexpr int FILTER_NUM = 32;
+#endif
 
     AD7689Drv(spi_type* spi);
     bool Init();

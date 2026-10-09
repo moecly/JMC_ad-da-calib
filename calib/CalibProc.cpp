@@ -26,7 +26,19 @@ const uint16_t kGrid[kGridN] = {0,     1000,  2000,  3000,  4000,  5000,  6000, 
                                 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000,
                                 60000, 61000, 62000, 63000, 64000, 65000, 65535};
 
+#if defined(CALIB_FIXED_IDEAL)
+// 驻留自检：把整个扫描点都钉在同一个 ideal 上，分离「施加不稳」与「采集不稳」
+uint16_t kGridLive[kGridN];
+#else
+const uint16_t* const kGridLive = kGrid;
+#endif
+
+// 建压等待；CALIB_SETTLE_MS 可覆盖，用于定位 DA/RC 建立时间不足
+#if defined(CALIB_SETTLE_MS)
+constexpr uint32_t kSettleMs = CALIB_SETTLE_MS;
+#else
 constexpr uint32_t kSettleMs = 200;
+#endif
 // 稳定判据：DA 建压等待后采 kStableCount 次，窗内极差 > kStableCode 只打 unstable 标记，不中断
 constexpr uint32_t kSampleIntervalMs = 5;
 constexpr int kStableCount = 16;
@@ -122,7 +134,9 @@ void RefTick() {
             if (len >= 4) {
                 uint16_t ideal;
                 std::memcpy(&ideal, payload + 2, 2);
-                Bd().CalibDaSet(payload[1], Bd().CalibDaRaw(payload[1], ideal));
+                uint16_t rawToSet = Bd().CalibDaRaw(payload[1], ideal);
+                Bd().CalibDaSet(payload[1], rawToSet);
+                LogInfo << "calib: set_da ch=" << (unsigned)payload[1] << " ideal=" << ideal << " raw=" << rawToSet;
                 resp[0] = OP_ACK_SET_DA;
             } else {
                 resp[0] = OP_NACK;
@@ -166,13 +180,13 @@ void StartPoint() {
     uint8_t p[4];
     p[0] = OP_SET_DA;
     p[1] = kRefCh;
-    uint16_t g = kGrid[s_sweepIdx];
+    uint16_t g = kGridLive[s_sweepIdx];
     std::memcpy(p + 2, &g, 2);
     CalibLinkSend(p, 4);
     s_phase = PH_WAIT;
 #else
     for (int ch = 0; ch < 4; ch++) {
-        uint16_t raw = kGrid[s_sweepIdx];
+        uint16_t raw = kGridLive[s_sweepIdx];
         // CHK 比较的是「设定 ideal」与「量得 ideal」，驱动值先经本机曲线反算成 raw
         if (kCheckMode) raw = Bd().CalibDaRaw((uint8_t)ch, raw);
         Bd().CalibDaSet((uint8_t)ch, raw);
@@ -183,17 +197,17 @@ void StartPoint() {
 
 void ChkPoint() {
     double d[4];
-    const double set = (double)kGrid[s_sweepIdx];
+    const double set = (double)kGridLive[s_sweepIdx];
     for (int ch = 0; ch < 4; ch++) {
         d[ch] = (double)s_samples[ch][s_sweepIdx] - set;
         const double ad = d[ch] < 0 ? -d[ch] : d[ch];
         if (ad > s_chkMax[ch]) {
             s_chkMax[ch] = ad;
-            s_chkMaxAt[ch] = kGrid[s_sweepIdx];
+            s_chkMaxAt[ch] = kGridLive[s_sweepIdx];
         }
     }
     char msg[80];
-    snprintf(msg, sizeof(msg), "calib: set=%u d=%+.1f,%+.1f,%+.1f,%+.1f", (unsigned)kGrid[s_sweepIdx], d[0], d[1], d[2],
+    snprintf(msg, sizeof(msg), "calib: set=%u d=%+.1f,%+.1f,%+.1f,%+.1f", (unsigned)kGridLive[s_sweepIdx], d[0], d[1], d[2],
              d[3]);
     LogInfo << msg;
 }
@@ -295,11 +309,21 @@ void DoSweep() {
         {
             char m[112];
             snprintf(m, sizeof(m), "calib: pt%u ideal=%u raw=%u,%u,%u,%u%s", (unsigned)s_sweepIdx,
-                     (unsigned)kGrid[s_sweepIdx], (unsigned)s_samples[0][s_sweepIdx],
+                     (unsigned)kGridLive[s_sweepIdx], (unsigned)s_samples[0][s_sweepIdx],
                      (unsigned)s_samples[1][s_sweepIdx], (unsigned)s_samples[2][s_sweepIdx],
                      (unsigned)s_samples[3][s_sweepIdx], settled ? "" : " unstable");
             LogInfo << m;
         }
+#if defined(CALIB_LOG_SPAN)
+        {
+            char sp[128];
+            snprintf(sp, sizeof(sp), "calib: span%u min=%u,%u,%u,%u max=%u,%u,%u,%u", (unsigned)s_sweepIdx,
+                     (unsigned)s_stableMin[0], (unsigned)s_stableMin[1], (unsigned)s_stableMin[2],
+                     (unsigned)s_stableMin[3], (unsigned)s_stableMax[0], (unsigned)s_stableMax[1],
+                     (unsigned)s_stableMax[2], (unsigned)s_stableMax[3]);
+            LogInfo << sp;
+        }
+#endif
         AdvancePoint();
 #else
         s_waitMs++;
@@ -317,16 +341,16 @@ void DoSweep() {
 void AdvVerifyPoint();
 
 void ChkVerifyPoint() {
-    const double set = (double)kGrid[s_verifyIdx];
+    const double set = (double)kGridLive[s_verifyIdx];
     char msg[128];
-    int n = snprintf(msg, sizeof(msg), "calib: vfy set=%u d=", (unsigned)kGrid[s_verifyIdx]);
+    int n = snprintf(msg, sizeof(msg), "calib: vfy set=%u d=", (unsigned)kGridLive[s_verifyIdx]);
     for (int ch = 0; ch < 4; ch++) {
         double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][s_verifyIdx]) - set;
         s_verSumSq[ch] += d * d;
         double ad = d < 0 ? -d : d;
         if (ad > s_verMax[ch]) {
             s_verMax[ch] = ad;
-            s_verMaxAt[ch] = kGrid[s_verifyIdx];
+            s_verMaxAt[ch] = kGridLive[s_verifyIdx];
         }
         n += snprintf(msg + n, sizeof(msg) - n, "%s%+.1f", ch ? "," : "", d);
     }
@@ -352,7 +376,7 @@ void DoVerifySweep() {
         uint8_t p[4];
         p[0] = OP_SET_DA;
         p[1] = kRefCh;
-        uint16_t ideal = kGrid[s_verifyIdx];
+        uint16_t ideal = kGridLive[s_verifyIdx];
         std::memcpy(p + 2, &ideal, 2);
         CalibLinkSend(p, 4);
         s_phase = PH_WAIT;
@@ -410,10 +434,20 @@ void DoVerifySweep() {
     {
         char m[112];
         snprintf(m, sizeof(m), "calib: vfy%u set=%u raw=%u,%u,%u,%u%s", (unsigned)s_verifyIdx,
-                 (unsigned)kGrid[s_verifyIdx], (unsigned)s_verify[0][s_verifyIdx], (unsigned)s_verify[1][s_verifyIdx],
+                 (unsigned)kGridLive[s_verifyIdx], (unsigned)s_verify[0][s_verifyIdx], (unsigned)s_verify[1][s_verifyIdx],
                  (unsigned)s_verify[2][s_verifyIdx], (unsigned)s_verify[3][s_verifyIdx], settled ? "" : " unstable");
         LogInfo << m;
     }
+#if defined(CALIB_LOG_SPAN)
+    {
+        char sp[128];
+        snprintf(sp, sizeof(sp), "calib: vspan%u min=%u,%u,%u,%u max=%u,%u,%u,%u", (unsigned)s_verifyIdx,
+                 (unsigned)s_stableMin[0], (unsigned)s_stableMin[1], (unsigned)s_stableMin[2],
+                 (unsigned)s_stableMin[3], (unsigned)s_stableMax[0], (unsigned)s_stableMax[1],
+                 (unsigned)s_stableMax[2], (unsigned)s_stableMax[3]);
+        LogInfo << sp;
+    }
+#endif
     ChkVerifyPoint();
     AdvVerifyPoint();
 }
@@ -457,9 +491,9 @@ void DoVerify() {
         char ol[256];
         int m = snprintf(ol, sizeof(ol), "calib: vfy ch%d |d|>=%d at:", ch, (int)kCheckGateCode);
         for (int i = 0; i < kGridN && m < (int)sizeof(ol) - 16; i++) {
-            double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][i]) - (double)kGrid[i];
+            double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][i]) - (double)kGridLive[i];
             if (d < 0) d = -d;
-            if (d >= kCheckGateCode) m += snprintf(ol + m, sizeof(ol) - m, " %u(%.0f)", (unsigned)kGrid[i], d);
+            if (d >= kCheckGateCode) m += snprintf(ol + m, sizeof(ol) - m, " %u(%.0f)", (unsigned)kGridLive[i], d);
         }
         LogInfo << ol;
         anyBad = true;
@@ -491,7 +525,7 @@ void DoDump() {
         int off = s_dumpLine * kChunkVals;
         int n = snprintf(dl, sizeof(dl), "calib: dump grid %d", off);
         for (int i = off; i < kGridN && i < off + kChunkVals; i++) {
-            n += snprintf(dl + n, sizeof(dl) - n, " %u", (unsigned)kGrid[i]);
+            n += snprintf(dl + n, sizeof(dl) - n, " %u", (unsigned)kGridLive[i]);
         }
         LogInfo << dl;
         s_dumpLine++;
@@ -553,7 +587,7 @@ void DoFit() {
         }
         char st[128];
         snprintf(st, sizeof(st), "calib: ch%d resid max=%.1f @ideal=%u rmse=%.1f",
-                 ch, maxRes, (unsigned)kGrid[maxAt], sqrt(sumSq / kGridN));
+                 ch, maxRes, (unsigned)kGridLive[maxAt], sqrt(sumSq / kGridN));
         LogInfo << st;
         if (maxRes > kResidualLimitCode) {
             char rs[256];
@@ -562,7 +596,7 @@ void DoFit() {
                 double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
                 if (d < 0) d = -d;
                 if (d > kResidualLimitCode) {
-                    n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGrid[i], d);
+                    n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGridLive[i], d);
                 }
             }
             LogError << rs;
@@ -717,8 +751,13 @@ void DutTick() {
 
 void CalibProcInit() {
     CalibLinkInit();
+#if defined(CALIB_FIXED_IDEAL)
     for (int i = 0; i < kGridN; i++) {
-        s_gridD[i] = (double)kGrid[i];
+        kGridLive[i] = (uint16_t)(CALIB_FIXED_IDEAL);
+    }
+#endif
+    for (int i = 0; i < kGridN; i++) {
+        s_gridD[i] = (double)kGridLive[i];
     }
 
 #if defined(CONFIG_CALIB_ROLE_REF)

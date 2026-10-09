@@ -128,6 +128,12 @@ bool AD7689Drv::Sync() {
     // for (int i = 0; i < 1; i++) {
     //     m_readADData[i] = ReadOneChannelData(i);
     // }
+#if defined(AD_BURST_SAMPLE)
+    m_readADData[0] = ReadOneChannelData(0);
+    m_readADData[1] = ReadOneChannelData(2);
+    m_readADData[2] = ReadOneChannelData(5);
+    m_readADData[3] = ReadOneChannelData(7);
+#endif
     // m_readADData[0] = ReadOneChannelData(0);
     // m_readADData[1] = ReadOneChannelData(2);
     // m_readADData[2] = ReadOneChannelData(5);
@@ -174,7 +180,9 @@ uint16_t AD7689Drv::ReadOneChannelData(int channel) {
     // if (channel == 0) {
     // LogDebug << "channel[0] = " << readVal;
     // LogDebug << "readVal = " << readVal;
+#if !defined(AD_BURST_SAMPLE)
     LogDebug << "chann = " << channel << ", readVal = " << readVal;
+#endif
     // }
 
     return readVal;

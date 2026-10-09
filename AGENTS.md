@@ -105,6 +105,14 @@ python3 tools/parse_calib_dump.py /tmp/dut.log --ch 0 > /tmp/ad0.txt
 # 判据: Rust 的 `补偿后 max/rmse` 应等于固件的 `ch0 resid max/rmse`（逐位一致即证明拟合无误）
 # 上电即复检: cmake ... -DCMAKE_CXX_FLAGS=-DCONFIG_VERIFY_ON_BOOT -B build/AD_4CH-DUT-boot
 
+# 采集链路定位（编译开关，默认全关；详见 Testing & QA）
+# -DCALIB_LOG_SPAN=1        DUT 每点追加 `calib: span%u min=… max=…`（窗内极差）
+# -DCALIB_FIXED_IDEAL=25000 67 点全钉在该 ideal 上驻留，分离「施加不稳」与「采集不稳」
+# REF 侧 `calib: set_da ch= ideal= raw=` 恒开，用于核对实际施加码
+cmake -DBOARD=AD_4CH -DCALIB_ROLE=DUT -DBUILD_TYPE=Debug -DCALIB_LOG_SPAN=1 -DCALIB_FIXED_IDEAL=25000 \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build/AD_4CH-DUT-dwell
+cmake --build build/AD_4CH-DUT-dwell
+
 # 烧录 / 调试（probe-rs，chip=at32f425k8t7）
 just download build/DA_4CH-Debug-v1.8.elf   # 仅烧录
 just run      build/DA_4CH-Debug-v1.8.elf   # 烧录并运行，日志经 RTT 打在终端（无需串口）
@@ -133,6 +141,7 @@ just watch                                   # watchexec 增量重建
 - 定时任务：TMR1 硬件 1ms 时基 → `SoftTimer` 链表（`ONESHOT` / `PERIOD`）。
 - Workbench 生成文件：用户代码只能写进 `/* add user code begin X */ ... /* add user code end X */` 区段，否则重新生成会被覆盖。
 - 遗留文件 `user/main.cpp.bak`、`user/InterruptCallback.cpp.bak` 不参与编译（glob 只匹配 `.c`/`.cpp`），属旧版参考。
+- 已踩过的坑：`CuteLogger` 曾为每条日志 `new[]`/`delete[]` 一次 1 KB 缓冲（RAII 临时对象，高频日志下堆碎片严重），已改为内嵌定长 `kMessageSize=256` 栈缓冲；`MS5542` 构造函数内 `SetVal(0)` 必须在 `m_delay` 初始化**之后**调用，否则 `DelayUs()` 解引用空 `unique_ptr` 直接 HardFault。构造体内成员初始化顺序即使用顺序，先 `make_unique` 再使用。
 
 ## Important Files
 
@@ -178,7 +187,15 @@ just watch                                   # watchexec 增量重建
 - **无测试框架、无 CI、无宿主可运行目标**。不存在 `test/` 目录、Unity/CppUTest/gtest，也没有 `.github/workflows`、`.gitlab-ci.yml`、`Jenkinsfile`。
 - 唯一的质量门是构建成功 + 静态检查配置（`.clang-tidy` 已配置但未接入自动化流水线；`cppcheck` 无配置）。
 - 验证手段只能是硬件在环：`cmake --build build` → `just run <elf>` → 通过 USART4 日志（`LogInfo`/`LogTrace`）与 SWD 调试观察行为。改动驱动/标定/定时逻辑后，必须说明需要哪块板卡验证。
-- AD 标定实测（AD_4CH=DUT, DA_4CH=REF）：`kResidualLimitCode` 原为 32 时必然失败，实测四通道扫描残差 85~155，且坏点集中在 `@ideal=42000~52000` 同一区间。残差来源是 REF 的 DA 在该电压段的非线性，非拟合算法或采样噪声——**已用固件 dump + PC 端 Rust 工具逐位证实**：`DoFit` 把每通道 67 点原始码与系数经 `calib: dump` 行导出，`tools/parse_calib_dump.py` 还原成 `ideal<TAB>raw` 后喂 `adc-poly calib --mode code`，Rust `补偿后 max/rmse` 与固件 `ch%d resid max/rmse` 一致（实测 ch0 133.18/72.38 vs 133.4/72.4）。现阈值放宽到 1000 以保证落盘，该段闭环误差仍偏大，待查 REF DA 线性度。
+- AD 标定实测（AD_4CH=DUT, DA_4CH=REF）：**根因已定位为 REF 的 MS5542 在局部码段输出不可重复**，证据链如下。
+  - **排除 DUT 采集侧**：`code_to_code()`（`Board/DA_4CH/Board.cpp:17`）曲线在问题段斜率平滑单调（19000~21000 段 993.57→993.51，无凸起）；REF 的 `calib: set_da raw=` 序列严格单调（ideal+1000 ⇒ raw+993/994，无跳变无重复）。⇒ 写给 MS5542 的码正确。
+  - **定位到 MS5542 输出**：对复检期 raw（= 真实 DA 传递特性）做三次最小二乘拟合，残差**只在局部码段有凸起**，其余全部点 ≤ 27 码（实测：19000 −106、20000 +90、21000 −59、22000 +25，其余 max 27）。
+  - **凸起不可重复**：两次运行间隔 3 min，凸起位置完全不同（一次在 19000~21000，一次在 24000~27000）。⇒ 不是 MS5542 的确定性非线性，是同一码段多次输出不一致。
+  - **凸起形态固定**：符号交替、幅度衰减（`−115, +87, −66, +21, −10`），是「局部脉冲」经三次拟合后的残差响应——三次多项式只有 4 个自由度，无法同时拟合局部凸起与全局趋势，残差溢出到相邻点。
+  - **该次运行其余点 |d| ≤ 15**：局部凸起主导整个残差（max 115 vs 其余 ≤ 25）。
+  - **已用硬件数据排除的假设**：建压时间（`kSettleMs` 200→600 反而更差）；AD 盒式窗过渡带（`FILTER_NUM` 32→4 无改善）；通道轮转/`t_ACQ`（单通道连发绕过 4 ms 轮转无改善）；REF ACK 时序（ACK 在 `CalibDaSet()` 之后才发）；拟合方向与系数（离线逐位复算一致）；SPI 位/CFG 布局（对照 AD7689 手册 Table 13 逐位核对正确）；AD7689 内部 REF（凸起形态是局部码段而非全量程乘性偏移，四通道同步仅因输入电压相同）。
+  - **残差门限**：`kResidualLimitCode` 当前为 1000（仅保证落盘），实测残差 25~170 码；`kCheckGateCode=16` 的复检必然 FAIL。根因在 MS5542 硬件侧，固件无法消除；应收紧落盘门限（建议 max≈120 / rmse≈40 双判据）避免坏系数落盘，或改用分段/更高次拟合吸收局部凸起。
+  - 定位工具已内置（编译开关，默认关闭，均在 `CMakeLists.txt` 定义为 cache 变量并经 `target_compile_definitions` 传入）：`-DCALIB_LOG_SPAN=1` 让 DUT 在扫描段每点 `calib: pt…` 后追加 `calib: span%u min=… max=…`、在复检段每点 `calib: vfy…` 后追加 `calib: vspan%u min=… max=…`（四通道各自的窗内 min/max，用于判断「电平在窗内是否稳定」）；`-DCALIB_FIXED_IDEAL=<code>` 把 67 点全钉在该 ideal 上驻留（分离「施加不稳」与「采集不稳」）；`-DCALIB_SETTLE_MS=<ms>` 覆盖 `kSettleMs`；`-DAD_FILTER_NUM=<n>` 覆盖 `AD7689Drv::FILTER_NUM`（盒式窗深度）；`-DAD_BURST_SAMPLE=1` 让 `Sync()` 改走 `ReadOneChannelData()`（每通道连发 3 帧、间隔 1 ms，绕过 4 ms 轮转）。REF 侧 `OP_SET_DA` 恒打印 `calib: set_da ch= ideal= raw=`（REF 实际写给 MS5542 的码）。
 - DUT 写盘后复检（`S_VERIFY`）：用刚写入 Flash 的记录重跑 67 点闭环，每点打印 `vfy set=… d=…`，末尾 `verify ch%d max=… @set=… rmse=…` + 超 `kCheckGateCode`(16) 点清单 + `PASS`/`FAIL`。仅出日志结论，**不回滚系数**（FAIL 不擦 Flash、不改 LED）。复检 `max` 略高于扫描 `resid`（实测 164 vs 133）属训练误差→泛化误差的正常增量。`CONFIG_VERIFY_ON_BOOT` 可让上电即复检。
 - `S_DUMP` 导出：每次 tick 发一行、行间 `kLineGapMs=100`，19 行（grid 3 + ch0..3 各 3 + coeff 4）约 1.9 s。**必须节流**——RTT 上行环缓仅 1024 B，一次性发完会被主机读取速率限制而丢字节（见 Runtime/Tooling 的 RTT 条目）。
 - 提交前最低要求：该板型 Debug 与 Release 均能构建通过，且 `.hex` 正常生成。
