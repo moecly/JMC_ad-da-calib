@@ -91,7 +91,26 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* add user code begin HardFault_IRQ 0 */
-
+  {
+    unsigned int cfsr = *(volatile unsigned int *)0xE000ED28;
+    unsigned int hfsr = *(volatile unsigned int *)0xE000ED2C;
+    unsigned int bfar = *(volatile unsigned int *)0xE000ED38;
+    unsigned int mmfar = *(volatile unsigned int *)0xE000ED34;
+    char buf[200];
+    int n = 0;
+    const char *hex = "0123456789abcdef";
+    const char *tags[2] = {"\r\n=== HARD FAULT ===\r\nCFSR=", ""};
+    for (const char *p = tags[0]; *p; p++) buf[n++] = *p;
+    for (int i = 28; i >= 0; i -= 4) buf[n++] = hex[(cfsr >> i) & 0xF];
+    buf[n++]=' '; const char *t2="HFSR="; for(const char*p=t2;*p;p++) buf[n++]=*p;
+    for (int i = 28; i >= 0; i -= 4) buf[n++] = hex[(hfsr >> i) & 0xF];
+    buf[n++]=' '; const char *t3="MMFAR="; for(const char*p=t3;*p;p++) buf[n++]=*p;
+    for (int i = 28; i >= 0; i -= 4) buf[n++] = hex[(mmfar >> i) & 0xF];
+    buf[n++]=' '; const char *t4="BFAR="; for(const char*p=t4;*p;p++) buf[n++]=*p;
+    for (int i = 28; i >= 0; i -= 4) buf[n++] = hex[(bfar >> i) & 0xF];
+    buf[n++]='\r'; buf[n++]='\n';
+    RttWriteRaw(buf, (unsigned int)n);
+  }
   /* add user code end HardFault_IRQ 0 */
   /* go to infinite loop when hard fault exception occurs */
   while (1)

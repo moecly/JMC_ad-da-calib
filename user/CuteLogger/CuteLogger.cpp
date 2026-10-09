@@ -20,7 +20,6 @@ void Logger::Write(const char* file, const char* function, const int line, const
     m_lock.Lock();
     const char* data = FormatData(file, function, line, message, logLevel);
     m_outStream->Write(data);
-    delete[] data;
     m_lock.UnLock();
 }
 
@@ -44,9 +43,9 @@ const char* BaseName(const char* path) {
 }  // namespace
 
 const char* Logger::FormatData(const char* file, const char* function, const int line, const char* message, const Logger::LogLevel logLevel) {
-    const int bufferSize = 2048;
-    char* buffer = new char[bufferSize];
-    memset(buffer, 0, bufferSize);
+    static char buffer[512];
+    const int bufferSize = sizeof(buffer);
+    buffer[0] = '\0';
 
     const char* levelStr;
     switch (logLevel) {
@@ -81,28 +80,23 @@ Logger& GetLoggerInstance() {
     return Logger::GetInstance();
 }
 
-CuteLogger::CuteLogger(const char *file, const char *function, const int line, const Logger::LogLevel logLevel, const int maxSize) 
+CuteLogger::CuteLogger(const char *file, const char *function, const int line, const Logger::LogLevel logLevel) 
  : m_file(file),
    m_function(function),
    m_line(line),
    m_logLevel(logLevel),
-   m_maxSize(maxSize),
    m_length(0) {
-    m_message = new char[maxSize];
-    memset(m_message, 0, maxSize);
+    m_message[0] = '\0';
 }
 
 CuteLogger::~CuteLogger() {
-    if (m_message) {
-        GetLoggerInstance().Write(m_file, m_function, m_line, m_message, m_logLevel);
-        delete[] m_message;
-    }
+    GetLoggerInstance().Write(m_file, m_function, m_line, m_message, m_logLevel);
 }
 
 CuteLogger& CuteLogger::operator<<(const char* message) {
     size_t len = strlen(message);
-    if (m_length + len > m_maxSize) return *this;
-    strcat(m_message, message);
+    if (m_length + len >= kMessageSize) return *this;
+    memcpy(m_message + m_length, message, len + 1);
     m_length += len;
     return *this;
 }
@@ -111,8 +105,8 @@ CuteLogger& CuteLogger::operator<<(int value) {
     char buffer[32];
     snprintf(buffer, sizeof(buffer), "%d", value);
     size_t len = strlen(buffer);
-    if (m_length + len > m_maxSize) return *this;
-    strcat(m_message, buffer);
+    if (m_length + len >= kMessageSize) return *this;
+    memcpy(m_message + m_length, buffer, len + 1);
     m_length += len;
     return *this;
 }
@@ -121,8 +115,8 @@ CuteLogger& CuteLogger::operator<<(unsigned int value) {
     char buffer[32];
     snprintf(buffer, sizeof(buffer), "%u", value);
     size_t len = strlen(buffer);
-    if (m_length + len > m_maxSize) return *this;
-    strcat(m_message, buffer);
+    if (m_length + len >= kMessageSize) return *this;
+    memcpy(m_message + m_length, buffer, len + 1);
     m_length += len;
     return *this;
 }
@@ -131,8 +125,8 @@ CuteLogger& CuteLogger::operator<<(long value) {
     char buffer[32];
     snprintf(buffer, sizeof(buffer), "%ld", value);
     size_t len = strlen(buffer);
-    if (m_length + len > m_maxSize) return *this;
-    strcat(m_message, buffer);
+    if (m_length + len >= kMessageSize) return *this;
+    memcpy(m_message + m_length, buffer, len + 1);
     m_length += len;
     return *this;
 }
@@ -141,8 +135,8 @@ CuteLogger& CuteLogger::operator<<(unsigned long value) {
     char buffer[32];
     snprintf(buffer, sizeof(buffer), "%lu", value);
     size_t len = strlen(buffer);
-    if (m_length + len > m_maxSize) return *this;
-    strcat(m_message, buffer);
+    if (m_length + len >= kMessageSize) return *this;
+    memcpy(m_message + m_length, buffer, len + 1);
     m_length += len;
     return *this;
 }
@@ -152,8 +146,8 @@ CuteLogger& CuteLogger::operator<<(char value) {
     buffer[0] = value;
     buffer[1] = '\0';
     size_t len = 1;
-    if (m_length + len > m_maxSize) return *this;
-    strcat(m_message, buffer);
+    if (m_length + len >= kMessageSize) return *this;
+    memcpy(m_message + m_length, buffer, len + 1);
     m_length += len;
     return *this;
 }
@@ -163,8 +157,8 @@ CuteLogger& CuteLogger::operator<<(unsigned char value) {
     buffer[0] = static_cast<char>(value);
     buffer[1] = '\0';
     size_t len = 1;
-    if (m_length + len > m_maxSize) return *this;
-    strcat(m_message, buffer);
+    if (m_length + len >= kMessageSize) return *this;
+    memcpy(m_message + m_length, buffer, len + 1);
     m_length += len;
     return *this;
 }

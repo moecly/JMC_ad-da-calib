@@ -39,7 +39,7 @@ Logger& GetLoggerInstance();
 
 class CuteLogger {
 public: 
-    CuteLogger(const char* file, const char* function, const int line, const Logger::LogLevel logLevel, const int maxSize=1024);
+    CuteLogger(const char* file, const char* function, const int line, const Logger::LogLevel logLevel);
     ~CuteLogger();
     CuteLogger& operator<<(const char* message);
     CuteLogger& operator<<(int value);
@@ -49,11 +49,11 @@ public:
     CuteLogger& operator<<(char value);
     CuteLogger& operator<<(unsigned char value);
 private:
+    static constexpr int kMessageSize = 256;
     const char* m_file;
     const char* m_function;
     const int m_line;
-    char* m_message;
+    char m_message[kMessageSize];
     const Logger::LogLevel m_logLevel;
-    const int m_maxSize;
     int m_length;
 };

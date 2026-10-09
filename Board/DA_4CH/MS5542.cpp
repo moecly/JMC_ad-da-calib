@@ -5,8 +5,8 @@
 
 MS5542::MS5542(spi_type* spi, gpio_type* csPort, uint16_t csPin) : m_spi(spi), m_csPort(csPort), m_csPin(csPin) {
     m_lastVal = 1;
-    SetVal(0);
     m_delay = std::make_unique<SysDelay>();
+    SetVal(0);
 }
 
 MS5542::~MS5542() = default;
@@ -19,6 +19,8 @@ std::optional<bool> MS5542::SetVal(uint16_t val) {
     spi_i2s_data_transmit(m_spi, val);
     while (spi_i2s_flag_get(m_spi, SPI_I2S_RDBF_FLAG) == 0);
     spi_i2s_data_receive(m_spi);
+    // CS 拉高太快时 MS5542 来不及锁存刚写入的码，留出建立时间
+    m_delay->DelayUs(10);
     gpio_bits_set(m_csPort, m_csPin);
     m_lastVal = val;
     // LogInfo << "success";

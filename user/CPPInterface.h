@@ -10,6 +10,7 @@ extern "C" {
 
 void ApplicationInit();
 void SwTmrTick(uint32_t tick);
+void RttWriteRaw(const char* data, uint32_t len);
 
 #ifdef __cplusplus
 }
