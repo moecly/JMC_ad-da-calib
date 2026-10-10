@@ -252,6 +252,16 @@ fn calib_status(state: State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn calib_verify(state: State<AppState>, mask: u8, ref_da: Vec<u8>) -> Result<(), String> {
+    if ref_da.len() != 4 {
+        return Err("ref_da 需要 4 个元素".to_string());
+    }
+    let da = [ref_da[0] & 0x03, ref_da[1] & 0x03, ref_da[2] & 0x03, ref_da[3] & 0x03];
+    push_command(&state, proto::config(mask & 0x0F, da))?;
+    push_command(&state, proto::verify())
+}
+
+#[tauri::command]
 fn reset_target(_app: AppHandle, state: State<AppState>, run_only: Option<bool>) -> Result<(), String> {
     let connected = state
         .conn
@@ -319,6 +329,7 @@ pub fn run() {
             manual_set_da,
             manual_read_ad,
             calib_status,
+            calib_verify,
             reset_target,
             manual_begin,
             manual_abort,

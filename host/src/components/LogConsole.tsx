@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { LogLine } from "../types";
 import * as api from "../lib/ipc";
+import { Button, Input, Switch } from "./ui";
 
 interface Props {
   lines: LogLine[];
@@ -12,15 +13,15 @@ const levelClass = (level: string) => {
   switch (level) {
     case "ERROR":
     case "FATAL":
-      return "text-red-400";
+      return "text-danger-ink";
     case "WARNING":
-      return "text-amber-400";
+      return "text-warn-ink";
     case "INFO":
-      return "text-slate-200";
+      return "text-ink";
     case "DEBUG":
-      return "text-slate-400";
+      return "text-ink-soft";
     default:
-      return "text-slate-500";
+      return "text-ink-faint";
   }
 };
 
@@ -48,30 +49,27 @@ export function LogConsole({ lines, onClear }: Props) {
   };
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-slate-700 px-3 py-2 text-xs">
-        <span className="font-semibold text-slate-200">日志</span>
-        <span className="text-slate-500">{shown.length} 行</span>
-        <input
-          className="ml-2 w-40 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-slate-200"
+    <div className="flex h-full flex-col bg-panel">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs">
+        <span className="font-semibold text-ink">日志</span>
+        <span className="text-ink-faint">{shown.length} 行</span>
+        <Input
+          className="ml-2 w-40"
           placeholder="过滤…"
           value={filter}
           onChange={(e) => setFilter(e.currentTarget.value)}
         />
-        <label className="flex items-center gap-1 text-slate-400">
-          <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.currentTarget.checked)} />
-          自动滚动
-        </label>
+        <Switch checked={autoScroll} onChange={setAutoScroll} label="自动滚动" />
         <div className="ml-auto flex gap-2">
-          <button className="rounded border border-slate-600 px-2 py-0.5 text-slate-200" onClick={() => void loadFile()}>
+          <Button size="sm" onClick={() => void loadFile()}>
             加载日志
-          </button>
-          <button className="rounded border border-slate-600 px-2 py-0.5 text-slate-200" onClick={() => void onClear()}>
+          </Button>
+          <Button size="sm" onClick={() => void onClear()}>
             清空
-          </button>
+          </Button>
         </div>
       </div>
-      <div className="flex-1 overflow-auto bg-slate-950 p-2 font-mono text-xs leading-relaxed">
+      <div className="flex-1 overflow-auto p-3 font-mono text-xs leading-relaxed">
         {shown.map((l, i) => (
           <div key={i} className={levelClass(l.level)}>
             {l.raw}

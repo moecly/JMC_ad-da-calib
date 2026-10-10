@@ -9,6 +9,7 @@ pub const OP_HOST_STOP: u8 = 0x15;
 pub const OP_HOST_SET_DA: u8 = 0x16;
 pub const OP_HOST_READ_AD: u8 = 0x17;
 pub const OP_HOST_STATUS: u8 = 0x18;
+pub const OP_HOST_VERIFY: u8 = 0x19;
 pub const OP_HOST_MANUAL_BEGIN: u8 = 0x20;
 pub const OP_HOST_MANUAL_ABORT: u8 = 0x21;
 pub const OP_HOST_MANUAL_SET_RAW: u8 = 0x22;
@@ -65,6 +66,10 @@ pub fn status() -> Vec<u8> {
     frame(&[OP_HOST_STATUS])
 }
 
+pub fn verify() -> Vec<u8> {
+    frame(&[OP_HOST_VERIFY])
+}
+
 pub fn manual_begin() -> Vec<u8> {
     frame(&[OP_HOST_MANUAL_BEGIN])
 }
@@ -109,6 +114,7 @@ mod tests {
         assert_eq!(&set_da(1, 25000)[2..6], &[OP_HOST_SET_DA, 1, 0xA8, 0x61]);
         assert_eq!(&read_ad()[2..3], &[OP_HOST_READ_AD]);
         assert_eq!(&status()[2..3], &[OP_HOST_STATUS]);
+        assert_eq!(&verify()[2..3], &[OP_HOST_VERIFY]);
         assert_eq!(&manual_set_raw(2, 40000)[2..6], &[0x22, 2, 0x40, 0x9C]);
         assert_eq!(&manual_add(0, 65535)[2..6], &[0x23, 0, 0xFF, 0xFF]);
         assert_eq!(&manual_fit()[2..3], &[0x24]);

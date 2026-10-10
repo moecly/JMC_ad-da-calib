@@ -15,6 +15,7 @@ export interface Stat {
 export interface ChannelReport {
   ch: number;
   samples: number[];
+  verify_samples: number[];
   coeff: [number, number, number, number] | null;
   resid: Stat | null;
   resid_at: number | null;
@@ -63,6 +64,8 @@ export interface CalibReport {
   points: number;
   total_points: number;
   grid: number[];
+  verify_grid: number[];
+  verify_points: number;
   channels: ChannelReport[];
   saved: boolean;
   verify_started: boolean;

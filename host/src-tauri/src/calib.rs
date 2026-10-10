@@ -16,6 +16,7 @@ pub struct Stat {
 pub struct ChannelReport {
     pub ch: usize,
     pub samples: Vec<f64>,
+    pub verify_samples: Vec<f64>,
     pub coeff: Option<[f64; 4]>,
     pub resid: Option<Stat>,
     pub resid_at: Option<u16>,
@@ -69,6 +70,8 @@ pub struct CalibReport {
     pub points: u32,
     pub total_points: u32,
     pub grid: Vec<u16>,
+    pub verify_grid: Vec<u16>,
+    pub verify_points: u32,
     pub channels: Vec<ChannelReport>,
     pub saved: bool,
     pub verify_started: bool,
@@ -96,6 +99,9 @@ static RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^run ch=(\d+) da=
 static AD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ad ch=(\d+) raw=(\d+)").unwrap());
 static DPT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^dpt(\d+) ch=(\d+) ideal=(\d+) meas=(\d+)").unwrap());
+static DVFY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^dvfy(\d+) ch=(\d+) set=(\d+) meas=([-0-9.eE+]+)").unwrap()
+});
 static REFAD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^refad ch=(\d+) ideal=([-0-9.eE+]+)$").unwrap());
 static REF_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -180,6 +186,8 @@ fn fresh_report() -> CalibReport {
         points: 0,
         total_points: TOTAL_POINTS,
         grid: Vec::new(),
+        verify_grid: Vec::new(),
+        verify_points: 0,
         channels,
         saved: false,
         verify_started: false,
@@ -210,6 +218,7 @@ impl Parser {
         self.report = CalibReport {
             device: old.device,
             app_version: old.app_version,
+            role: old.role,
             board_dir: old.board_dir,
             record_loaded: old.record_loaded,
             ref_info: old.ref_info,
@@ -416,6 +425,21 @@ impl Parser {
                 self.report.points = done;
             }
             self.report.phase = "sweep".to_string();
+            return true;
+        }
+
+        if let Some(c) = DVFY_RE.captures(rest) {
+            let idx = parse_u16(&c[1]) as usize;
+            let ch = parse_u16(&c[2]) as usize;
+            put(&mut self.report.verify_grid, idx, parse_u16(&c[3]));
+            if ch < CHANNELS {
+                putf(&mut self.chan(ch).verify_samples, idx, parse_f64(&c[4]));
+            }
+            let done = (idx + 1) as u32;
+            if done > self.report.verify_points {
+                self.report.verify_points = done;
+            }
+            self.report.phase = "verify".to_string();
             return true;
         }
 
@@ -893,6 +917,8 @@ mod tests {
         assert!(!parser.report.saved);
         assert_eq!(parser.report.points, 0);
         assert_eq!(parser.report.phase, "idle");
+        // 角色是会话级摘要，reset 后仍保留（固件 OP_HOST_VERIFY 不重发 role，靠此维持 DUT 识别）
+        assert_eq!(parser.report.role.as_deref(), Some("DUT"));
         assert_eq!(parser.report.channels.len(), CHANNELS);
         assert!(parser.report.channels[0].coeff.is_none());
         assert!(parser.report.errors.is_empty());
@@ -979,5 +1005,38 @@ mod tests {
         assert!(!parser.report.manual.channels[0].fitted);
         assert_eq!(parser.report.manual.errors.len(), 1);
         assert_eq!(parser.report.phase, "manual");
+    }
+
+    #[test]
+    fn parses_verify_only_session() {
+        let mut lines = vec![
+            framed("HostPoll", "calib: role DUT"),
+            framed("HostPoll", "calib: board ad"),
+            framed("HostPoll", "calib: reset"),
+            framed("HostPoll", "calib: state verify"),
+            framed("HostPoll", "calib: coeff ch0 0.0 1.0 0.0 0.0"),
+            framed("HostPoll", "calib: verify start"),
+        ];
+        for i in 0..TOTAL_POINTS {
+            let set = i * 1000;
+            lines.push(framed(
+                "DoVerify",
+                &format!("calib: dvfy{i} ch=0 set={set} meas={}", set + 3),
+            ));
+        }
+        lines.push(framed("DoVerify", "calib: verify ch0 max=3.0 @set=0 rmse=3.0"));
+        lines.push(framed("DoVerify", "calib: verify PASS"));
+
+        let mut parser = Parser::new();
+        for raw in lines {
+            let line = crate::rtt::parse_line(&raw);
+            parser.feed(&line.message);
+        }
+        let r = &parser.report;
+        assert_eq!(r.verify_points, TOTAL_POINTS);
+        assert_eq!(r.verify_grid.len(), TOTAL_POINTS as usize);
+        assert_eq!(r.channels[0].verify_samples[5], 5003.0);
+        assert!(r.channels[0].verify.is_some());
+        assert_eq!(r.verify_pass, Some(true));
     }
 }

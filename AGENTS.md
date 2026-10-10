@@ -51,7 +51,7 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
 | `calib/` | 校准，仅 `CALIB_ROLE` 非 `APP` 时编入：`CalibProc`（状态机/拟合/落盘/CHK 闭环自检/写盘后复检/dump 导出 + 上位机下行控制）、`CalibOps.h`（opcode 常量）、`CalibLink`（USART2 RS485 收发热链路）、`CalibStore`（`0x0800F000` 记录 v2 读写 + CRC-32）、`PolyFit`（三次多项式最小二乘）。状态机：`S_IDLE`（默认，等待上位机 start）→ `S_PING`→`S_SWEEP`→`S_FIT`→`S_DUMP`→`S_SAVE`→`S_VERIFY`→`S_DONE`，失败 `S_FAIL`；`CALIB_AUTO_START` 令 DUT 上电直接 `S_PING`（mask=0x0F，REF ch0）。上位机经 RTT 下行 `OP_HOST_*` 帧指定待校准通道位掩码与每通道 REF 源，**单次 67 点扫描并行标定全部选中通道**（每个勾选通道各一个源→通道映射，逐点对所有去重后的 REF 驱动源同时施加、一次读回全部通道，`FitAll` 一次拟合全部；`calib: run ch= da=` 每通道各一行）；支持暂停/继续/重启/停止，手动写码仅非运行态。角色分支：`REF` 应答 DUT 的 `OP_GET_INFO`（返回板型/版本/是否已有校准记录/`validMask`）；`MANUAL` 为单板手动校准（RTT 下行 `OP_HOST_MANUAL_*`：begin/abort/set-raw/add/fit/save），AD 板逐点采集（`mpt`）、DA 板写 raw 后录实测值，拟合 `mres`、落盘 `msaved`、回读复检 `mverify`，不用 RS485。每次校准只回写被标定通道的系数位（`CalibStoreLoad` 合并保留其余系数），落盘 `validMask`。每点采集 = 等 `kSettleMs` 让 DA 建压，再按 `kSampleIntervalMs` 采 `kStableCount` 次，落窗内 min/max 中值（抑制单次毛刺）；窗内极差 > `kStableCode` 仅打 `unstable` 标记，不中断。`FitAll` 对每个选中通道打印 `ch%d resid max=%.1f @ideal=%u rmse=%.1f`，任一超 `kResidualLimitCode` 时列出全部超标点并 `EnterFail()`。常量均在 `CalibProc.cpp` 顶部。**两方向均支持**：AD 板 DUT + DA 板 REF（DUT 发 `OP_SET_DA` 给 REF、回读本机 AD）；DA 板 DUT/CHK + AD 板 REF（DUT 本机写 DA raw、REF 回读 AD ideal，扫描逐点 `calib: dpt…`、复检逐点 `calib: dvfy…`、手动读参考 `calib: refad…`）。`S_PING` 收到 `OP_PONG` 后查询 REF 全量信息并校验板型方向：未应答 `calib: error ref no-reply`、板型不符 `calib: error ref mismatch`，两者均落 `S_FAIL`。详见 Testing & QA |
 | `docs/` | 设计文档：`calibration-flash.md`（校准记录字节布局与系数语义） |
 | `tools/` | PC 端工具，不参与固件编译：`calib_host.py`（RS485 主控，充当校准协议的外部发起方）、`parse_calib_dump.py`（把固件 `calib: dump` 行还原成 Rust 工具输入表） |
-| `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），经 SWD/RTT **双向**控制 DUT：下行 `[0xA5,len,payload,crc32]` 命令帧（配置连线/启动/暂停/继续/重启/停止/手动写码/读 AD/查状态/复位并运行/`OP_HOST_MANUAL_*`），上行解析固件 `calib:` 日志并可视化。卡片式标签页界面（概览/自动校准/手动校准/日志）：概览卡展示 DUT 设备/版本/板型与 REF 全量信息（`calib: ref board=/no-reply` + 逐通道校准状态），手动 tab 驱动单板采集→拟合→落盘→复检，另有前误差/拟合残差/复检误差曲线。自动校准页按 DUT `board_dir` 切换标签：DA 方向 `DA chN ← REF AD chM`、AD 方向 `AD chN ← REF DA chM`。连接层：附着后强制目标运行（`core.status()/run()`）、RTT 找不到时按错误变体给排障 `hint`、`disconnect` 有界且不持 `conn` 锁。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
+| `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），经 SWD/RTT **双向**控制 DUT：下行 `[0xA5,len,payload,crc32]` 命令帧（配置连线/启动/暂停/继续/重启/停止/手动写码/读 AD/查状态/复检（`OP_HOST_VERIFY`，直接以 Flash 现记录跳转写盘后复检流程）/复位并运行/`OP_HOST_MANUAL_*`），上行解析固件 `calib:` 日志并可视化。侧边栏分页界面（概览/自动校准/复检/手动校准/日志）：概览卡展示 DUT 设备/版本/板型与 REF 全量信息（`calib: ref board=/no-reply` + 逐通道校准状态），手动 tab 驱动单板采集→拟合→落盘→复检，复检 tab 下发 `OP_HOST_VERIFY` 后展示逐通道 `verify max/@set/rmse` 与 `mode="verify"` 误差曲线（数据源 `verify_grid`/`verify_samples`），另有前误差/拟合残差/复检误差曲线。自动校准页按 DUT `board_dir` 切换标签：DA 方向 `DA chN ← REF AD chM`、AD 方向 `AD chN ← REF DA chM`。连接层：附着后强制目标运行（`core.status()/run()`）、RTT 找不到时按错误变体给排障 `hint`、`disconnect` 有界且不持 `conn` 锁。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
 | `Board/<BOARD>/` | 板级代码：`Board.h/.cpp`、芯片驱动、`project/` |
 | `Board/<BOARD>/project/{inc,src}/` | AT32 Workbench 生成：`main.c`、`at32f425_wk_config.c`、`at32f425_int.c`、`wk_system.c` |
 | `Board/project/` | 新板型模板/存档，**不参与编译**（`BOARD` 从不等于 `project`） |
@@ -181,7 +181,7 @@ cd host && nix develop --command npm run tauri dev
 | `user/FWConfig.h` | 板型宏分发（新增板型必改） |
 | `Board/<BOARD>/Board.h` | 板型声明，被 `Application.h` 按 include 路径解析 |
 | `calib/CalibProc.{h,cpp}` | 校准状态机（`S_IDLE`/PING→扫描→拟合→dump→落盘→复检→DONE|FAIL）、LED 指示、上位机下行命令解析（`HostPoll`/`HandleHost`/`HandleManual`）；REF/DUT/CHK/MANUAL 行为在此分支；DUT 支持按通道位掩码并行校准、暂停/停止；MANUAL 为单板手动校准（采集/拟合/落盘/回读复检） |
-| `calib/CalibOps.h` | 共享 opcode 与帧常量：REF 应答协议（`OP_PING`/`OP_SET_DA`/`OP_READ_AD`/`OP_GET_INFO`/…）与上位机下行协议（`OP_HOST_CONFIG`…`OP_HOST_STATUS`、`OP_HOST_MANUAL_*`） |
+| `calib/CalibOps.h` | 共享 opcode 与帧常量：REF 应答协议（`OP_PING`/`OP_SET_DA`/`OP_READ_AD`/`OP_GET_INFO`/…）与上位机下行协议（`OP_HOST_CONFIG`…`OP_HOST_STATUS`/`OP_HOST_VERIFY`、`OP_HOST_MANUAL_*`） |
 | `calib/CalibLink.{h,cpp}` | USART2 + DMA1_CH1 环形收、阻塞发；帧格式 `0xA5,len,payload,crc32`（常量取自 `CalibOps.h`） |
 | `calib/CalibStore.{h,cpp}` | `0x0800F000` 校准记录 v2（含 `validMask`）读写与校验，`CalibCrc()` 共享 CRC-32 实例 |
 | `calib/PolyFit.{h,cpp}` | 三次多项式最小二乘拟合 / Horner 求值 |
@@ -197,6 +197,7 @@ cd host && nix develop --command npm run tauri dev
 | `host/src/components/OverviewTab.tsx` | 概览卡：连接状态 + DUT 设备/版本/板型/系数 + REF 全量信息与逐通道校准状态 |
 | `host/src/components/ManualPanel.tsx` | 手动校准 tab：AD 采集点 / DA 写码录值 → 拟合 → 写入 Flash → 复检展示 |
 | `host/src/components/ControlPanel.tsx` | 连线选择（按 DUT 板型方向：`AD chN←REF DA chM` / `DA chN←REF AD chM`）+ 流程按钮 + 手动写码/读 AD + 每通道有效性状态 |
+| `host/src/components/VerifyTab.tsx` | 复检 tab：连线选择（复用 `ChannelLinkMatrix`）→ `calib_verify`（先 CONFIG 后 `OP_HOST_VERIFY`）→ 展示逐通道 `verify max/@set/rmse` 与 `ErrorChart mode="verify"`；非 DUT 角色 / 无 Flash 记录给警示 |
 | `user/BaseTimer.{h,cpp}` / `user/Timer/Timer.h` | 硬件定时器抽象 |
 | `include/at32f425_conf.h` | 外设/中断裁剪开关 |
 | `ldscripts/AT32F425x8_FLASH.ld` | 内存布局与堆栈下限 |

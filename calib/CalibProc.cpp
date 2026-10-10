@@ -895,6 +895,33 @@ void HandleHost(const uint8_t* p, uint8_t len) {
             }
             if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL || s_paused) LogRefInfo(true);
             break;
+        case OP_HOST_VERIFY:
+            if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL || s_paused) {
+                s_paused = false;
+                ResetRunCounters();  // 会清零 s_runCount，故必须先于 ConfigFromMask
+                ConfigFromMask();
+                if (s_runCount == 0) {
+                    LogError << "calib: error empty-mask";
+                } else {
+                    CalibStoreLoad(&s_rec);  // 用 Flash 现记录复检
+                    s_stableCount = -1;      // 触发 DoVerifySweep 首个 PH_SEND 重置采样窗
+                    LogInfo << "calib: reset";
+                    s_state = S_VERIFY;
+                    PrintState();
+                    for (uint8_t ch = 0; ch < 4; ch++) {
+                        if (!(s_chMask & (1u << ch))) continue;
+                        char cm[128];
+                        int cn = snprintf(cm, sizeof(cm), "calib: coeff ch%u", (unsigned)ch);
+                        for (int k = 0; k < POLY_COEFF_NUM; k++) {
+                            cn += snprintf(cm + cn, sizeof(cm) - cn, " %.17g", s_rec.coeff[ch][k]);
+                        }
+                        LogInfo << cm;
+                    }
+                }
+            } else {
+                LogError << "calib: error busy";
+            }
+            break;
         default:
             LogError << "calib: error bad-op";
             break;

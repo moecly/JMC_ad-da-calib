@@ -1,14 +1,13 @@
 import { useState } from "react";
 import type { CalibReport } from "../types";
 import * as api from "../lib/ipc";
+import { Button, Card, CardTitle, Input, Pill, Select } from "./ui";
+import { ChannelLinkMatrix } from "./ChannelLinkMatrix";
 
 interface Props {
   connected: boolean;
   report: CalibReport | null;
 }
-
-const btn =
-  "rounded border border-slate-600 px-2 py-1 text-slate-200 disabled:cursor-not-allowed disabled:opacity-40";
 
 export function ControlPanel({ connected, report }: Props) {
   const [enabled, setEnabled] = useState<boolean[]>([false, false, false, false]);
@@ -49,130 +48,87 @@ export function ControlPanel({ connected, report }: Props) {
   const refName = dutIsDa ? "AD" : "DA";
 
   return (
-    <div className="flex flex-col gap-3 border-b border-slate-800 p-4 text-sm">
-      <div className="font-semibold text-slate-200">控制面板</div>
+    <Card className="flex flex-col gap-4">
+      <CardTitle>自动校准</CardTitle>
 
-      <div className="flex flex-col gap-1 text-xs">
-        <div className="text-slate-400">{`按连线选择单通道校准（${dutName} chN ← REF ${refName} chM）`}</div>
-        {[0, 1, 2, 3].map((ch) => (
-          <div key={ch} className="flex items-center gap-3">
-            <label className="flex w-24 items-center gap-1 text-slate-200">
-              <input
-                type="checkbox"
-                checked={enabled[ch]}
-                disabled={!connected}
-                onChange={(e) => {
-                  const v = e.currentTarget.checked;
-                  setEnabled((p) => p.map((x, i) => (i === ch ? v : x)));
-                }}
-              />
-              {dutName} ch{ch}
-            </label>
-            <select
-              className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-slate-200 disabled:opacity-50"
-              value={daSel[ch]}
-              disabled={!connected}
-              onChange={(e) => {
-                const v = Number(e.currentTarget.value);
-                setDaSel((p) => p.map((x, i) => (i === ch ? v : x)));
-              }}
-            >
-              {[0, 1, 2, 3].map((m) => (
-                <option key={m} value={m}>
-                  {refName} ch{m}
-                </option>
-              ))}
-            </select>
-          </div>
-        ))}
-      </div>
+      <ChannelLinkMatrix
+        enabled={enabled}
+        daSel={daSel}
+        dutName={dutName}
+        refName={refName}
+        disabled={!connected}
+        onToggle={(ch, on) => setEnabled((p) => p.map((x, i) => (i === ch ? on : x)))}
+        onDaSelect={(ch, da) => setDaSel((p) => p.map((x, i) => (i === ch ? da : x)))}
+      />
 
-      <div className="flex flex-wrap gap-2 text-xs">
-        <button className={btn} disabled={!connected} onClick={applyConfig}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={!connected} onClick={applyConfig}>
           配置
-        </button>
-        <button className={btn} disabled={!connected || maskOf() === 0} onClick={() => applyThen(api.calibStart)}>
+        </Button>
+        <Button size="sm" variant="primary" disabled={!connected || maskOf() === 0} onClick={() => applyThen(api.calibStart)}>
           启动
-        </button>
-        <button className={btn} disabled={!connected} onClick={() => run(api.calibPause)}>
+        </Button>
+        <Button size="sm" disabled={!connected} onClick={() => run(api.calibPause)}>
           暂停
-        </button>
-        <button className={btn} disabled={!connected} onClick={() => run(api.calibResume)}>
+        </Button>
+        <Button size="sm" disabled={!connected} onClick={() => run(api.calibResume)}>
           继续
-        </button>
-        <button className={btn} disabled={!connected || maskOf() === 0} onClick={() => applyThen(api.calibRestart)}>
+        </Button>
+        <Button size="sm" variant="primary" disabled={!connected || maskOf() === 0} onClick={() => applyThen(api.calibRestart)}>
           重启
-        </button>
-        <button className={btn} disabled={!connected} onClick={() => run(api.calibStop)}>
+        </Button>
+        <Button size="sm" disabled={!connected} onClick={() => run(api.calibStop)}>
           停止
-        </button>
-        <button className={btn} disabled={!connected} onClick={() => run(api.calibStatus)}>
+        </Button>
+        <Button size="sm" disabled={!connected} onClick={() => run(api.calibStatus)}>
           刷新状态
-        </button>
+        </Button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="text-slate-400">手动</span>
-        <select
-          className="rounded border border-slate-600 bg-slate-800 px-2 py-1 text-slate-200 disabled:opacity-50"
-          value={manualCh}
-          disabled={!connected}
-          onChange={(e) => setManualCh(Number(e.currentTarget.value))}
-        >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-ink-soft">手动</span>
+        <Select value={manualCh} disabled={!connected} onChange={(e) => setManualCh(Number(e.currentTarget.value))}>
           {[0, 1, 2, 3].map((m) => (
             <option key={m} value={m}>
               {dutName} ch{m}
             </option>
           ))}
-        </select>
-        <input
+        </Select>
+        <Input
           type="number"
           min={0}
           max={65535}
-          className="w-24 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-slate-200 disabled:opacity-50"
+          className="w-24"
           value={manualIdeal}
           disabled={!connected}
           onChange={(e) => setManualIdeal(Number(e.currentTarget.value))}
         />
-        <button
-          className={btn}
-          disabled={!connected}
-          onClick={() => run(() => api.manualSetDa(manualCh, manualIdeal))}
-        >
+        <Button size="sm" disabled={!connected} onClick={() => run(() => api.manualSetDa(manualCh, manualIdeal))}>
           {dutIsDa ? "写本机 DA raw" : "写码"}
-        </button>
-        <button className={btn} disabled={!connected} onClick={() => run(api.manualReadAd)}>
+        </Button>
+        <Button size="sm" disabled={!connected} onClick={() => run(api.manualReadAd)}>
           {dutIsDa ? "读 REF AD" : "读 AD"}
-        </button>
-        <span className="font-mono text-slate-300">
+        </Button>
+        <span className="font-mono tabular-nums text-ink-soft">
           {adRead.map((v, i) => `ch${i}:${v == null ? "—" : dutIsDa ? v.toFixed(1) : String(v)}`).join("  ")}
         </span>
       </div>
 
       <div className="flex flex-wrap items-center gap-3 text-xs">
-        <span className="text-slate-400">
-          状态：<span className="font-mono text-slate-200">{report?.phase ?? "—"}</span>
+        <span className="text-ink-soft">
+          状态：<span className="font-mono text-ink">{report?.phase ?? "—"}</span>
         </span>
-        <span className="text-slate-400">
-          当前 run：<span className="font-mono text-slate-200">{report?.run_ch ?? "—"}</span>
+        <span className="text-ink-soft">
+          当前 run：<span className="font-mono text-ink">{report?.run_ch ?? "—"}</span>
         </span>
         <span className="flex items-center gap-2">
           {channels.map((ch) => (
-            <span
-              key={ch.ch}
-              className={`rounded border px-1.5 py-0.5 ${
-                ch.valid
-                  ? "border-green-600 bg-green-600/20 text-green-400"
-                  : "border-slate-600 bg-slate-700/20 text-slate-400"
-              }`}
-            >
-              ch{ch.ch} {ch.valid ? "已校准" : "未校准"}
-            </span>
+            <Pill key={ch.ch} label={`ch${ch.ch} ${ch.valid ? "已校准" : "未校准"}`} tone={ch.valid ? "green" : "slate"} />
           ))}
         </span>
       </div>
 
-      {error && <div className="text-xs text-red-400">{error}</div>}
-    </div>
+      {error && <div className="text-xs text-danger-ink">{error}</div>}
+    </Card>
   );
 }

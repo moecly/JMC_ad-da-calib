@@ -21,6 +21,8 @@ export const manualSetDa = (ch: number, ideal: number) =>
   invoke<void>("manual_set_da", { ch, ideal });
 export const manualReadAd = () => invoke<void>("manual_read_ad");
 export const calibStatus = () => invoke<void>("calib_status");
+export const calibVerify = (mask: number, refDa: number[]) =>
+  invoke<void>("calib_verify", { mask, refDa });
 export const resetTarget = (runOnly = false) => invoke<void>("reset_target", { runOnly });
 export const manualBegin = () => invoke<void>("manual_begin");
 export const manualAbort = () => invoke<void>("manual_abort");
