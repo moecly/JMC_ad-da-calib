@@ -254,7 +254,7 @@ impl Parser {
     fn dispatch(&mut self, rest: &str) -> bool {
         if let Some(v) = rest.strip_prefix("role ") {
             let role = v.split_whitespace().next().unwrap_or("").to_string();
-            if role == "DUT" || role == "CHK" {
+            if role == "DUT" {
                 self.report.phase = "sweep".to_string();
             }
             if role == "MANUAL" {

@@ -16,10 +16,6 @@
 #include "calib/PolyFit.h"
 #include "Rtt.h"
 
-#if defined(CONFIG_CALIB_ROLE_CHK) && !defined(CONFIG_DEVICE_DA_4CH)
-#error "CALIB_ROLE=CHK drives and measures DA, only valid for DA_4CH"
-#endif
-
 #if defined(CONFIG_CALIB_ROLE_MANUAL) && !defined(CONFIG_DEVICE_AD_4CH) && !defined(CONFIG_DEVICE_DA_4CH)
 #error "CALIB_ROLE=MANUAL only valid for AD_4CH or DA_4CH"
 #endif
@@ -93,13 +89,8 @@ constexpr double kCheckGateCode = 16.0;
 constexpr uint8_t kRefCh = 0;
 
 CalibRecord s_rec;
-#if defined(CONFIG_CALIB_ROLE_CHK)
-constexpr bool kCheckMode = true;
-#else
-constexpr bool kCheckMode = false;
-#endif
 
-enum State { S_IDLE, S_PING, S_SWEEP, S_FIT, S_CHECK, S_DUMP, S_SAVE, S_VERIFY, S_DONE, S_FAIL };
+enum State { S_IDLE, S_PING, S_SWEEP, S_FIT, S_DUMP, S_SAVE, S_VERIFY, S_DONE, S_FAIL };
 enum Phase { PH_SEND, PH_WAIT, PH_SETTLE };
 
 float s_samples[4][kGridN];
@@ -113,8 +104,6 @@ int s_dumpLine;
 int s_dumpWait;
 double s_gridD[kGridN];
 double s_coeff[4][POLY_COEFF_NUM];
-double s_chkMax[4];
-uint16_t s_chkMaxAt[4];
 
 State s_state = S_IDLE;
 Phase s_phase = PH_SEND;
@@ -129,7 +118,7 @@ int s_pingCount;
 uint32_t s_failMs;
 bool s_ledOn;
 
-// DA 方向（DA 板 DUT/CHK）：已向 REF 发 OP_READ_AD 等应答，及窗内极值（REF 回传 float ideal）
+// DA 方向（DA 板 DUT）：已向 REF 发 OP_READ_AD 等应答，及窗内极值（REF 回传 float ideal）
 bool s_awaitReply = false;
 float s_measMin[4];
 float s_measMax[4];
@@ -192,7 +181,6 @@ const char* StateName() {
         case S_PING: return "ping";
         case S_SWEEP: return "sweep";
         case S_FIT: return "fit";
-        case S_CHECK: return "check";
         case S_DUMP: return "dump";
         case S_SAVE: return "save";
         case S_VERIFY: return "verify";
@@ -1076,8 +1064,6 @@ void StartPoint() {
 #else
     for (int ch = 0; ch < 4; ch++) {
         uint16_t raw = kGridLive[s_sweepIdx];
-        // CHK 比较的是「设定 ideal」与「量得 ideal」，驱动值先经本机曲线反算成 raw
-        if (kCheckMode) raw = Bd().CalibDaRaw((uint8_t)ch, raw);
         Bd().CalibDaSet((uint8_t)ch, raw);
     }
     s_awaitReply = false;
@@ -1087,27 +1073,10 @@ void StartPoint() {
 #endif
 }
 
-void ChkPoint() {
-    double d[4];
-    const double set = (double)kGridLive[s_sweepIdx];
-    for (int ch = 0; ch < 4; ch++) {
-        d[ch] = (double)s_samples[ch][s_sweepIdx] - set;
-        const double ad = d[ch] < 0 ? -d[ch] : d[ch];
-        if (ad > s_chkMax[ch]) {
-            s_chkMax[ch] = ad;
-            s_chkMaxAt[ch] = kGridLive[s_sweepIdx];
-        }
-    }
-    char msg[80];
-    snprintf(msg, sizeof(msg), "calib: set=%u d=%+.1f,%+.1f,%+.1f,%+.1f", (unsigned)kGridLive[s_sweepIdx], d[0], d[1], d[2],
-             d[3]);
-    LogInfo << msg;
-}
-
 void AdvancePoint() {
     s_sweepIdx++;
     if (s_sweepIdx >= kGridN) {
-        s_state = kCheckMode ? S_CHECK : S_FIT;
+        s_state = S_FIT;
         return;
     }
     s_phase = PH_SEND;
@@ -1115,7 +1084,7 @@ void AdvancePoint() {
 
 void DoSweep() {
     if (s_sweepIdx >= kGridN) {
-        s_state = kCheckMode ? S_CHECK : S_FIT;
+        s_state = S_FIT;
         return;
     }
 
@@ -1197,31 +1166,19 @@ void DoSweep() {
         for (int ch = 0; ch < 4; ch++) {
             s_measMid[ch] = MedianWin(s_measWin[ch], kStableCount);
         }
-        if (kCheckMode) {
-            for (int ch = 0; ch < 4; ch++) {
-                s_samples[ch][s_sweepIdx] = s_measMid[ch];
-            }
-            char raw[96];
-            snprintf(raw, sizeof(raw), "calib: raw m=%.1f,%.1f,%.1f,%.1f", (double)s_samples[0][s_sweepIdx],
-                     (double)s_samples[1][s_sweepIdx], (double)s_samples[2][s_sweepIdx],
-                     (double)s_samples[3][s_sweepIdx]);
-            LogInfo << raw;
-            ChkPoint();
-        } else {
-            for (int r = 0; r < s_runCount; r++) {
-                uint8_t ch = s_runs[r].adCh;
-                int src = s_runs[r].daCh;
-                float mid = s_measMid[src];
-                s_samples[ch][s_sweepIdx] = mid;
-                bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
-                char m[112];
-                snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
-                         (unsigned)kGridLive[s_sweepIdx], (double)mid, settled ? "" : " unstable");
-                LogInfo << m;
-            }
+        for (int r = 0; r < s_runCount; r++) {
+            uint8_t ch = s_runs[r].adCh;
+            int src = s_runs[r].daCh;
+            float mid = s_measMid[src];
+            s_samples[ch][s_sweepIdx] = mid;
+            bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
+            char m[112];
+            snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
+                     (unsigned)kGridLive[s_sweepIdx], (double)mid, settled ? "" : " unstable");
+            LogInfo << m;
         }
 #if defined(CALIB_LOG_SPAN)
-        if (!kCheckMode) {
+        {
             char sp[128];
             snprintf(sp, sizeof(sp), "calib: span%u min=%u,%u,%u,%u max=%u,%u,%u,%u", (unsigned)s_sweepIdx,
                      (unsigned)s_measMin[0], (unsigned)s_measMin[1], (unsigned)s_measMin[2], (unsigned)s_measMin[3],
@@ -1291,8 +1248,6 @@ void DoSweep() {
         return;
     }
 }
-
-#if !defined(CONFIG_CALIB_ROLE_CHK)
 
 void AdvVerifyPoint() {
     s_verifyIdx++;
@@ -1546,8 +1501,6 @@ void DoVerify() {
     LedSet(true);
 }
 
-#endif  // !CONFIG_CALIB_ROLE_CHK
-
 // 导出采样点与系数供 PC 端复算；每 tick 只发一行，且行间留出间隔让 RTT 主机读走
 void DoDump() {
     enum { kChunkVals = 24, kStr = 200, kLineGapMs = 100 };
@@ -1707,26 +1660,6 @@ void DoSave() {
     s_state = S_VERIFY;
 }
 
-#if defined(CONFIG_CALIB_ROLE_CHK)
-void DoCheck() {
-    char msg[128];
-    snprintf(msg, sizeof(msg), "calib: chk max |measured-set| = %.1f,%.1f,%.1f,%.1f", s_chkMax[0], s_chkMax[1],
-             s_chkMax[2], s_chkMax[3]);
-    LogInfo << msg;
-    for (int ch = 0; ch < 4; ch++) {
-        if (s_chkMax[ch] >= kCheckGateCode) {
-            snprintf(msg, sizeof(msg), "calib: chk fail ch=%d at set=%u", ch, (unsigned)s_chkMaxAt[ch]);
-            LogError << msg;
-            EnterFail();
-            return;
-        }
-    }
-    LogInfo << "calib: chk pass";
-    s_state = S_DONE;
-    LedSet(true);
-}
-#endif
-
 void DutTick() {
 #if defined(CONFIG_CALIB_ROLE_DUT)
     HostPoll();
@@ -1739,11 +1672,7 @@ void DutTick() {
             uint8_t payload[40];
             uint8_t len;
             if (CalibLinkRecv(payload, &len) == 0 && len >= 1 && payload[0] == OP_PONG) {
-                if (kCheckMode) {
-                    LogInfo << "calib: role CHK";
-                } else {
-                    LogInfo << "calib: role DUT";
-                }
+                LogInfo << "calib: role DUT";
                 ConfigFromMask();
                 LogRefInfo(true);
                 if (!s_refAnswered) {
@@ -1784,15 +1713,9 @@ void DutTick() {
         case S_DUMP:
             DoDump();
             break;
-#if defined(CONFIG_CALIB_ROLE_CHK)
-        case S_CHECK:
-            DoCheck();
-            break;
-#endif
         case S_SAVE:
             DoSave();
             break;
-#if !defined(CONFIG_CALIB_ROLE_CHK)
         case S_VERIFY:
             if (!s_verifyReported) {
                 DoVerify();
@@ -1802,7 +1725,6 @@ void DutTick() {
                 DoVerifySweep();
             }
             break;
-#endif
         case S_DONE:
             LedSet(true);
             break;
@@ -1848,19 +1770,13 @@ void CalibProcInit() {
     LogInfo << "calib: role REF ready";
     LedSet(true);
 #else
-    if (kCheckMode) {
-        s_state = S_PING;
-        s_pingCount = 0;
-        s_pingElapsed = kPingIntervalMs;
-    } else {
 #if defined(CALIB_AUTO_START)
-        s_state = S_PING;
-        s_pingCount = 0;
-        s_pingElapsed = kPingIntervalMs;
+    s_state = S_PING;
+    s_pingCount = 0;
+    s_pingElapsed = kPingIntervalMs;
 #else
-        s_state = S_IDLE;
+    s_state = S_IDLE;
 #endif
-    }
 #endif
 
     bool loaded = CalibStoreLoad(&s_rec);

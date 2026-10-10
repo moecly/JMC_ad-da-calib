@@ -22,6 +22,17 @@ ref_and_dut:
     just make DA_4CH REF
     just make AD_4CH DUT
 
+# 全部板型 × 全部角色一起编译（Debug；每组合独立 build 目录）
+all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for b in DA_4CH AD_4CH; do
+      for r in APP REF DUT MANUAL; do
+        echo "== $b $r"
+        just make "$b" "$r"
+      done
+    done
+
 # 清理某块板的构建目录
 clean board role="APP":
     rm -rf build/{{board}}-{{role}}

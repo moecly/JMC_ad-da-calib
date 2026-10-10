@@ -3,7 +3,7 @@
 #include "BaseBoard.h"
 #include "MS5542.h"
 
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK) || \
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || \
     defined(CONFIG_CALIB_ROLE_MANUAL)
 #include "calib/CalibStore.h"
 #include "calib/PolyFit.h"
@@ -16,7 +16,7 @@ public:
     void HandleData() override;
     void OneMsTask() override;
 
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK) || \
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || \
     defined(CONFIG_CALIB_ROLE_MANUAL)
     void CalibDaSet(uint8_t ch, uint16_t raw);
     double CalibBuiltinRawFromIdeal(uint16_t ideal) const;
