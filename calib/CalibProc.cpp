@@ -70,6 +70,14 @@ constexpr uint32_t kSettleMs = CALIB_SETTLE_MS;
 #else
 constexpr uint32_t kSettleMs = 200;
 #endif
+// 首点建压：扫描/复检开始时 DA 从上电电平或上一点大跳变过来，kSettleMs 不足以完全建压，
+// 会让低端锚点测偏 ~30 码（0 点测低 → 拟合记入坏锚点 → 复检在同一 set 上露出反向误差）。
+// 标定与复检两侧必须用同一值，否则两端读数不一致。CALIB_FIRST_SETTLE_MS 可覆盖
+#if defined(CALIB_FIRST_SETTLE_MS)
+constexpr uint32_t kFirstSettleMs = CALIB_FIRST_SETTLE_MS;
+#else
+constexpr uint32_t kFirstSettleMs = 600;
+#endif
 // 稳定判据：DA 建压等待后采 kStableCount 次，窗内极差 > kStableCode 只打 unstable 标记，不中断
 constexpr uint32_t kSampleIntervalMs = 5;
 constexpr int kStableCount = 16;
@@ -1178,7 +1186,7 @@ void DoSweep() {
 #if defined(CONFIG_DEVICE_AD_4CH)
         // 先固定等 kSettleMs 让 DA 建压，之后每 kSampleIntervalMs 采一次，攒够 kStableCount 次
         if (s_stableCount == 0) {
-            if (s_waitMs < kSettleMs) return;
+            if (s_waitMs < (s_sweepIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
             s_waitMs = 0;
             s_stableCount = 1;
         } else if (s_waitMs < kSampleIntervalMs) {
@@ -1221,7 +1229,7 @@ void DoSweep() {
         AdvancePoint();
 #else
         // DA 方向：等 DA 建压后进入「多次读 REF AD」回环
-        if (s_waitMs < kSettleMs) return;
+        if (s_waitMs < (s_sweepIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
         s_waitMs = 0;
         s_stableCount = 0;
         s_awaitReply = false;
@@ -1395,7 +1403,7 @@ void DoVerifySweep() {
     // PH_SETTLE：等 REF 建压后本地多次采样，取窗内 min/max 中值
     s_waitMs++;
     if (s_stableCount == 0) {
-        if (s_waitMs < kSettleMs) return;
+        if (s_waitMs < (s_verifyIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
         s_waitMs = 0;
         s_stableCount = 1;
     } else if (s_waitMs < kSampleIntervalMs) {
@@ -1426,7 +1434,7 @@ void DoVerifySweep() {
 #else
     // DA 方向：等本机 DA 建压 → 读 REF AD 攒窗
     s_waitMs++;
-    if (s_waitMs < kSettleMs) return;
+    if (s_waitMs < (s_verifyIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
     s_waitMs = 0;
     s_stableCount = 0;
     s_awaitReply = false;
