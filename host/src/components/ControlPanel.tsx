@@ -44,13 +44,16 @@ export function ControlPanel({ connected, report }: Props) {
 
   const channels = report?.channels ?? [];
   const adRead = report?.ad_read ?? [null, null, null, null];
+  const dutIsDa = report?.board_dir === "da";
+  const dutName = dutIsDa ? "DA" : "AD";
+  const refName = dutIsDa ? "AD" : "DA";
 
   return (
     <div className="flex flex-col gap-3 border-b border-slate-800 p-4 text-sm">
       <div className="font-semibold text-slate-200">控制面板</div>
 
       <div className="flex flex-col gap-1 text-xs">
-        <div className="text-slate-400">按连线选择单通道校准（AD chN ← REF DA chM）</div>
+        <div className="text-slate-400">{`按连线选择单通道校准（${dutName} chN ← REF ${refName} chM）`}</div>
         {[0, 1, 2, 3].map((ch) => (
           <div key={ch} className="flex items-center gap-3">
             <label className="flex w-24 items-center gap-1 text-slate-200">
@@ -63,7 +66,7 @@ export function ControlPanel({ connected, report }: Props) {
                   setEnabled((p) => p.map((x, i) => (i === ch ? v : x)));
                 }}
               />
-              AD ch{ch}
+              {dutName} ch{ch}
             </label>
             <select
               className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-slate-200 disabled:opacity-50"
@@ -76,7 +79,7 @@ export function ControlPanel({ connected, report }: Props) {
             >
               {[0, 1, 2, 3].map((m) => (
                 <option key={m} value={m}>
-                  DA ch{m}
+                  {refName} ch{m}
                 </option>
               ))}
             </select>
@@ -118,7 +121,7 @@ export function ControlPanel({ connected, report }: Props) {
         >
           {[0, 1, 2, 3].map((m) => (
             <option key={m} value={m}>
-              DA ch{m}
+              {dutName} ch{m}
             </option>
           ))}
         </select>
@@ -136,13 +139,13 @@ export function ControlPanel({ connected, report }: Props) {
           disabled={!connected}
           onClick={() => run(() => api.manualSetDa(manualCh, manualIdeal))}
         >
-          写码
+          {dutIsDa ? "写本机 DA raw" : "写码"}
         </button>
         <button className={btn} disabled={!connected} onClick={() => run(api.manualReadAd)}>
-          读 AD
+          {dutIsDa ? "读 REF AD" : "读 AD"}
         </button>
         <span className="font-mono text-slate-300">
-          {adRead.map((v, i) => `ch${i}:${v ?? "—"}`).join("  ")}
+          {adRead.map((v, i) => `ch${i}:${v == null ? "—" : dutIsDa ? v.toFixed(1) : String(v)}`).join("  ")}
         </span>
       </div>
 

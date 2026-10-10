@@ -17,6 +17,9 @@ use crate::calib::Parser;
 pub const MAX_LINES: usize = 5000;
 const PENDING_MAX: usize = 4096;
 const ATTACH_MAX_TRIES: u32 = 40;
+// 控制块只在固件 startup 由 .data 拷贝写进 SRAM：目标若被停机在复位态，SRAM 里没有
+// "SEGGER RTT" 魔数，单纯重扫永远不会成功，必须周期性强制复位并运行让固件重建控制块
+const AUTO_RESET_AFTER: u32 = 3;
 
 #[derive(Clone, Serialize)]
 pub struct ProbeInfo {
@@ -241,6 +244,9 @@ fn worker_loop(
             Ok(r) => r,
             Err(e) => {
                 tries += 1;
+                if tries == AUTO_RESET_AFTER || (tries > AUTO_RESET_AFTER && tries % 10 == 0) {
+                    let _ = core.reset();
+                }
                 let state = if tries >= ATTACH_MAX_TRIES { "error" } else { "searching" };
                 emit_status(
                     &app,

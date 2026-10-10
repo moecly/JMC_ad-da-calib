@@ -15,7 +15,7 @@ pub struct Stat {
 #[derive(Clone, Default, Serialize)]
 pub struct ChannelReport {
     pub ch: usize,
-    pub samples: Vec<u16>,
+    pub samples: Vec<f64>,
     pub coeff: Option<[f64; 4]>,
     pub resid: Option<Stat>,
     pub resid_at: Option<u16>,
@@ -75,7 +75,7 @@ pub struct CalibReport {
     pub verify_pass: Option<bool>,
     pub valid_mask: u16,
     pub run_ch: Option<usize>,
-    pub ad_read: [Option<u16>; 4],
+    pub ad_read: [Option<f64>; 4],
     pub errors: Vec<String>,
     pub device: Option<String>,
     pub app_version: Option<String>,
@@ -86,8 +86,6 @@ pub struct CalibReport {
     pub manual: ManualReport,
 }
 
-static PT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\d+) ideal=(\d+) raw=(\d+),(\d+),(\d+),(\d+)").unwrap());
 static RESID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^ch(\d+) resid max=([-0-9.eE+]+) @ideal=(\d+) rmse=([-0-9.eE+]+)").unwrap()
 });
@@ -96,6 +94,10 @@ static VERIFY_CH_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^run ch=(\d+) da=(\d+)").unwrap());
 static AD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ad ch=(\d+) raw=(\d+)").unwrap());
+static DPT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^dpt(\d+) ch=(\d+) ideal=(\d+) meas=(\d+)").unwrap());
+static REFAD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^refad ch=(\d+) ideal=([-0-9.eE+]+)$").unwrap());
 static REF_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^ref board=(\d+) ver=(\d+)\.(\d+) has=(\d+) mask=0x([0-9A-Fa-f]+)$").unwrap()
 });
@@ -121,6 +123,13 @@ pub fn poly_eval(coeff: &[f64; 4], x: f64) -> f64 {
 fn put(vec: &mut Vec<u16>, idx: usize, value: u16) {
     if vec.len() <= idx {
         vec.resize(idx + 1, 0);
+    }
+    vec[idx] = value;
+}
+
+fn putf(vec: &mut Vec<f64>, idx: usize, value: f64) {
+    if vec.len() <= idx {
+        vec.resize(idx + 1, 0.0);
     }
     vec[idx] = value;
 }
@@ -393,20 +402,39 @@ impl Parser {
             return true;
         }
 
+        if let Some(c) = DPT_RE.captures(rest) {
+            let idx = parse_u16(&c[1]) as usize;
+            let ch = parse_u16(&c[2]) as usize;
+            let ideal = parse_u16(&c[3]);
+            let meas = parse_f64(&c[4]);
+            put(&mut self.report.grid, idx, ideal);
+            if ch < CHANNELS {
+                putf(&mut self.chan(ch).samples, idx, meas);
+            }
+            let done = (idx + 1) as u32;
+            if done > self.report.points {
+                self.report.points = done;
+            }
+            self.report.phase = "sweep".to_string();
+            return true;
+        }
+
         if let Some(c) = AD_RE.captures(rest) {
             let ch = parse_u16(&c[1]) as usize;
             if ch >= CHANNELS {
                 return false;
             }
-            self.report.ad_read[ch] = Some(parse_u16(&c[2]));
+            self.report.ad_read[ch] = Some(parse_u16(&c[2]) as f64);
             return true;
         }
 
-        if let Some(v) = rest.strip_prefix("pt") {
-            if v.starts_with(|c: char| c.is_ascii_digit()) {
-                return self.feed_pt(v);
+        if let Some(c) = REFAD_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch >= CHANNELS {
+                return false;
             }
-            return false;
+            self.report.ad_read[ch] = Some(parse_f64(&c[2]));
+            return true;
         }
 
         if let Some(v) = rest.strip_prefix("dump grid ") {
@@ -479,9 +507,21 @@ impl Parser {
             return false;
         }
 
-        if rest == "ref not found" || rest == "ref timeout" || rest == "flash write failed" {
+        if rest == "ref not found"
+            || rest == "ref timeout"
+            || rest == "flash write failed"
+            || rest == "error ref no-reply"
+            || rest == "error ref mismatch"
+            || rest == "error read_ad timeout"
+        {
             self.report.errors.push(rest.to_string());
             self.report.phase = "fail".to_string();
+            if rest == "error ref no-reply" {
+                self.report.ref_info = Some(RefInfo {
+                    no_reply: true,
+                    ..Default::default()
+                });
+            }
             return true;
         }
         if rest.starts_with("fit failed ch=") {
@@ -493,38 +533,21 @@ impl Parser {
         false
     }
 
-    fn feed_pt(&mut self, v: &str) -> bool {
-        let Some(c) = PT_RE.captures(v) else {
-            return false;
-        };
-        let idx = parse_u16(&c[1]) as usize;
-        let ideal = parse_u16(&c[2]);
-        put(&mut self.report.grid, idx, ideal);
-        for (ch, capture) in (3..7).enumerate() {
-            let value = parse_u16(&c[capture]);
-            put(&mut self.chan(ch).samples, idx, value);
-        }
-        self.report.points += 1;
-        self.report.phase = "sweep".to_string();
-        true
-    }
-
     fn feed_dump(&mut self, tail: &str, ch: Option<usize>) -> bool {
         let mut it = tail.split_whitespace();
         let Some(off) = it.next().and_then(|s| s.parse::<usize>().ok()) else {
             return false;
         };
-        let values: Vec<u16> = it.map(parse_u16).collect();
         match ch {
             None => {
-                for (i, v) in values.iter().enumerate() {
-                    put(&mut self.report.grid, off + i, *v);
+                for (i, v) in it.enumerate() {
+                    put(&mut self.report.grid, off + i, parse_u16(v));
                 }
             }
             Some(ch) if ch < CHANNELS => {
-                let rep = self.chan(ch);
-                for (i, v) in values.iter().enumerate() {
-                    put(&mut rep.samples, off + i, *v);
+                for (i, v) in it.enumerate() {
+                    let val = parse_f64(v);
+                    putf(&mut self.chan(ch).samples, off + i, val);
                 }
             }
             _ => return false,
@@ -623,13 +646,13 @@ impl Parser {
     }
 }
 
-fn stat_of(samples: &[u16], grid: &[u16], coeff: Option<&[f64; 4]>) -> Stat {
+fn stat_of(samples: &[f64], grid: &[u16], coeff: Option<&[f64; 4]>) -> Stat {
     let mut sum_sq = 0.0;
     let mut max = 0.0;
     for (s, g) in samples.iter().zip(grid.iter()) {
         let measured = match coeff {
-            Some(c) => poly_eval(c, *s as f64),
-            None => *s as f64,
+            Some(c) => poly_eval(c, *s),
+            None => *s,
         };
         let d = measured - *g as f64;
         sum_sq += d * d;
@@ -665,14 +688,16 @@ mod tests {
         let mut lines = Vec::new();
         lines.push(framed("DoSweep", "calib: role DUT"));
         for i in 0..TOTAL_POINTS as usize {
-            let unstable = if i == 5 { " unstable" } else { "" };
-            lines.push(framed(
-                "DoSweep",
-                &format!(
-                    "calib: pt{i} ideal={} raw={},{},{},{}{}",
-                    grid[i], samples[i], samples[i], samples[i], samples[i], unstable
-                ),
-            ));
+            for ch in 0..CHANNELS {
+                let unstable = if i == 5 { " unstable" } else { "" };
+                lines.push(framed(
+                    "DoSweep",
+                    &format!(
+                        "calib: dpt{i} ch={ch} ideal={} meas={}{unstable}",
+                        grid[i], samples[i]
+                    ),
+                ));
+            }
         }
         for ch in 0..CHANNELS {
             let mut sum_sq = 0.0;
@@ -733,18 +758,24 @@ mod tests {
         lines.push(framed("DoSave", "calib: saved"));
         lines.push(framed("DoVerify", "calib: verify start"));
         for i in 0..TOTAL_POINTS as usize {
-            lines.push(framed(
-                "DoVerify",
-                &format!(
-                    "calib: vfy{i} set={} raw={},{},{},{}",
-                    grid[i], samples[i], samples[i], samples[i], samples[i]
-                ),
-            ));
+            for ch in 0..CHANNELS {
+                lines.push(framed(
+                    "DoVerify",
+                    &format!(
+                        "calib: dvfy{i} ch={ch} set={} meas={}",
+                        grid[i], samples[i]
+                    ),
+                ));
+                lines.push(framed(
+                    "DoVerify",
+                    &format!("calib: vfy set={} ch{ch} d=0.0", grid[i]),
+                ));
+            }
         }
         let mut verify = String::from("calib: verify");
         for ch in 0..CHANNELS {
-            let sep = if ch == 0 { "" } else { "; " };
-            verify.push_str(&format!("{sep}ch{ch} max=0.0 @set=0 rmse=0.0"));
+            let sep = if ch == 0 { "" } else { ";" };
+            verify.push_str(&format!("{sep} ch{ch} max=0.0 @set=0 rmse=0.0"));
         }
         lines.push(framed("DoVerify", &verify));
         lines.push(framed("DoVerify", "calib: verify PASS"));
@@ -776,6 +807,8 @@ mod tests {
         assert!(!r.channels[3].valid);
         for ch in &r.channels {
             assert_eq!(ch.samples.len(), TOTAL_POINTS as usize);
+            // 一行汇总须覆盖全部通道（固件缓冲区过小会静默截断末通道）
+            assert!(ch.verify.is_some(), "ch{} verify missing", ch.ch);
             // 固件 resid 以 %.1f 打印，与本机按全精度复算的值比对需容忍半个末位
             let after = ch.after.clone().unwrap();
             let resid = ch.resid.clone().unwrap();
@@ -810,7 +843,7 @@ mod tests {
         assert!(parser.feed("calib: run ch=1 da=0"));
         assert_eq!(parser.report.run_ch, Some(1));
         assert!(parser.feed("calib: ad ch=1 raw=12345 ideal=24690.0"));
-        assert_eq!(parser.report.ad_read[1], Some(12345));
+        assert_eq!(parser.report.ad_read[1], Some(12345.0));
         assert_eq!(parser.report.ad_read[0], None);
         assert!(parser.feed("calib: mask 0x2"));
         assert_eq!(parser.report.valid_mask, 0x2);
@@ -820,10 +853,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_da_direction_lines() {
+        let mut parser = Parser::new();
+        assert!(parser.feed("calib: role DUT"));
+        assert!(parser.feed("calib: run ch=0 da=2"));
+        assert!(parser.feed("calib: dpt3 ch=0 ideal=3000 meas=3100"));
+        assert_eq!(parser.report.points, 4);
+        assert_eq!(parser.report.grid[3], 3000);
+        assert_eq!(parser.report.channels[0].samples[3], 3100.0);
+        assert_eq!(parser.report.channels[1].samples.len(), 0);
+        assert!(parser.feed("calib: dpt3 ch=1 ideal=3000 meas=3050"));
+        assert_eq!(parser.report.channels[1].samples[3], 3050.0);
+        assert_eq!(parser.report.points, 4);
+
+        // REF ideal 可超 65535（AD 标定曲线），不得被当成 u16 溢出丢成 0
+        assert!(parser.feed("calib: dpt4 ch=0 ideal=65535 meas=65930"));
+        assert_eq!(parser.report.channels[0].samples[4], 65930.0);
+
+        assert!(parser.feed("calib: refad ch=2 ideal=12345.5"));
+        assert_eq!(parser.report.ad_read[2], Some(12345.5));
+
+        assert!(parser.feed("calib: error ref mismatch"));
+        assert!(!parser.report.errors.is_empty());
+        assert_eq!(parser.report.phase, "fail");
+    }
+
+    #[test]
     fn reset_clears_previous_run() {
         let mut parser = Parser::new();
         parser.feed("calib: role DUT");
-        parser.feed("calib: pt0 ideal=0 raw=1,2,3,4");
+        parser.feed("calib: dpt0 ch=0 ideal=0 meas=1");
         parser.feed("calib: ch0 resid max=5.0 @ideal=0 rmse=3.0");
         parser.feed("calib: saved");
         parser.feed("calib: verify PASS");

@@ -28,7 +28,8 @@ export function ManualPanel({ connected, report }: { connected: boolean; report:
   const inManual = manual?.on ?? false;
   const channel = manual?.channels[ch];
   const fitted = channel?.fitted ?? false;
-  const ready = connected && inManual;
+  const isManualFw = report?.role === "MANUAL";
+  const ready = connected && isManualFw && inManual;
 
   if (!boardDir) {
     return (
@@ -58,11 +59,19 @@ export function ManualPanel({ connected, report }: { connected: boolean; report:
           手动校准 · {boardLabel(boardDir)}
         </CardTitle>
 
+        {connected && !isManualFw && (
+          <div className="mb-3 rounded border border-amber-700 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+            {report?.role
+              ? `当前固件角色为 ${report.role}，不含手动校准命令。请烧录 CALIB_ROLE=MANUAL 固件（如 ${(boardDir === "da" ? "DA" : "AD")}_4CH MANUAL）后再操作。`
+              : "未获取到固件角色：连接后在「概览 → 刷新信息」。"}
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="primary" disabled={!connected || inManual} onClick={() => run(api.manualBegin)}>
+          <Button variant="primary" disabled={!connected || !isManualFw || inManual} onClick={() => run(api.manualBegin)}>
             开始手动校准
           </Button>
-          <Button variant="danger" disabled={!connected || !inManual} onClick={() => run(api.manualAbort)}>
+          <Button variant="danger" disabled={!connected || !isManualFw || !inManual} onClick={() => run(api.manualAbort)}>
             放弃
           </Button>
           <Pill label={inManual ? "手动模式" : "未进入"} tone={inManual ? "blue" : "slate"} />
@@ -103,7 +112,7 @@ export function ManualPanel({ connected, report }: { connected: boolean; report:
         {boardDir === "ad" ? (
           <div className="mt-4 flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-3">
-              <Button disabled={!connected} onClick={() => run(api.manualReadAd)}>
+              <Button disabled={!connected || !isManualFw} onClick={() => run(api.manualReadAd)}>
                 读当前码
               </Button>
               <span className="font-mono text-xs text-slate-300">
