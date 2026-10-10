@@ -22,6 +22,7 @@ export interface ChannelReport {
   verify_at: number | null;
   before: Stat | null;
   after: Stat | null;
+  valid: boolean;
 }
 
 export interface CalibReport {
@@ -34,6 +35,9 @@ export interface CalibReport {
   saved: boolean;
   verify_started: boolean;
   verify_pass: boolean | null;
+  valid_mask: number;
+  run_ch: number | null;
+  ad_read: (number | null)[];
   errors: string[];
 }
 

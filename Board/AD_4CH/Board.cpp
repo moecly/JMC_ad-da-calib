@@ -56,8 +56,9 @@ float Board::CalibAdIdeal(uint8_t ch, uint16_t raw) const {
         loaded = true;
         if (!CalibStoreLoad(&rec)) rec.degree = 0;
     }
-    if (rec.degree != POLY_DEGREE) return (float)(ch == kRefCh ? code_to_code(raw) : raw);
-    return (float)PolyEval(rec.coeff[ch], (double)raw);
+    if (rec.degree == POLY_DEGREE && (rec.validMask & (1u << ch)))
+        return (float)PolyEval(rec.coeff[ch], (double)raw);
+    return (float)(ch == kRefCh ? code_to_code(raw) : raw);
 }
 #endif
 

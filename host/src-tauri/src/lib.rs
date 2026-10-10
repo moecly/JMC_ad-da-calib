@@ -1,4 +1,5 @@
 mod calib;
+mod proto;
 mod rtt;
 
 use std::collections::VecDeque;
@@ -19,6 +20,7 @@ pub struct AppState {
     status: Arc<Mutex<Status>>,
     lines: Arc<Mutex<VecDeque<LogLine>>>,
     parser: Arc<Mutex<Parser>>,
+    commands: Arc<Mutex<VecDeque<Vec<u8>>>>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +60,7 @@ fn connect(
         return Err(format!("未找到探针 #{probe_index}"));
     };
     let stop = Arc::new(AtomicBool::new(false));
+    state.commands.lock().clear();
     let handle = rtt::spawn_worker(
         app.clone(),
         stop.clone(),
@@ -66,6 +69,7 @@ fn connect(
         state.lines.clone(),
         state.parser.clone(),
         state.status.clone(),
+        state.commands.clone(),
     );
     *conn = Some((handle, stop));
     *state.probe_name.lock() = Some(name);
@@ -81,6 +85,7 @@ fn disconnect(app: AppHandle, state: State<AppState>) -> Result<(), String> {
         let _ = handle.join();
     }
     drop(conn);
+    state.commands.lock().clear();
     *state.probe_name.lock() = None;
     rtt::emit_status(&app, &state.status, false, "已断开");
     Ok(())
@@ -119,6 +124,69 @@ async fn load_log_file(
     Ok(())
 }
 
+fn push_command(state: &State<AppState>, frame: Vec<u8>) -> Result<(), String> {
+    let connected = state
+        .conn
+        .lock()
+        .as_ref()
+        .map(|(h, _)| !h.is_finished())
+        .unwrap_or(false);
+    if !connected {
+        return Err("未连接".to_string());
+    }
+    state.commands.lock().push_back(frame);
+    Ok(())
+}
+
+#[tauri::command]
+fn calib_config(state: State<AppState>, mask: u8, ref_da: Vec<u8>) -> Result<(), String> {
+    if ref_da.len() != 4 {
+        return Err("ref_da 需要 4 个元素".to_string());
+    }
+    let da = [ref_da[0] & 0x03, ref_da[1] & 0x03, ref_da[2] & 0x03, ref_da[3] & 0x03];
+    push_command(&state, proto::config(mask & 0x0F, da))
+}
+
+#[tauri::command]
+fn calib_start(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::start())
+}
+
+#[tauri::command]
+fn calib_pause(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::pause())
+}
+
+#[tauri::command]
+fn calib_resume(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::resume())
+}
+
+#[tauri::command]
+fn calib_restart(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::restart())
+}
+
+#[tauri::command]
+fn calib_stop(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::stop())
+}
+
+#[tauri::command]
+fn manual_set_da(state: State<AppState>, ch: u8, ideal: u16) -> Result<(), String> {
+    push_command(&state, proto::set_da(ch & 0x03, ideal))
+}
+
+#[tauri::command]
+fn manual_read_ad(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::read_ad())
+}
+
+#[tauri::command]
+fn calib_status(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::status())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -130,7 +198,16 @@ pub fn run() {
             disconnect,
             get_snapshot,
             clear_report,
-            load_log_file
+            load_log_file,
+            calib_config,
+            calib_start,
+            calib_pause,
+            calib_resume,
+            calib_restart,
+            calib_stop,
+            manual_set_da,
+            manual_read_ad,
+            calib_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

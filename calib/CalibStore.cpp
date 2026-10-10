@@ -6,7 +6,7 @@
 
 namespace {
 constexpr uint32_t CALIB_MAGIC = 0x314C4143;
-constexpr uint16_t CALIB_VERSION = 1;
+constexpr uint16_t CALIB_VERSION = 2;
 constexpr uint16_t CALIB_CHANNEL_COUNT = 4;
 constexpr uint32_t CALIB_PAYLOAD_LEN = 128;
 constexpr int CALIB_CRC_OFFSET = 148;
@@ -49,6 +49,10 @@ bool CalibStoreLoad(CalibRecord* out) {
     std::memcpy(&payloadLen, base + 12, 4);
     if (payloadLen != CALIB_PAYLOAD_LEN) return false;
 
+    uint16_t validMask;
+    std::memcpy(&validMask, base + 16, 2);
+    if ((validMask & ~0xF) != 0) return false;
+
     uint32_t crcCalc = CalibCrc().Calculate(reinterpret_cast<const char*>(base), CALIB_CRC_OFFSET);
     uint32_t crcStored;
     std::memcpy(&crcStored, base + CALIB_CRC_OFFSET, 4);
@@ -58,6 +62,7 @@ bool CalibStoreLoad(CalibRecord* out) {
     tmp.board = board;
     tmp.degree = degree;
     tmp.channelCount = channelCount;
+    tmp.validMask = validMask;
     std::memcpy(tmp.coeff, base + CALIB_PAYLOAD_OFFSET, CALIB_PAYLOAD_LEN);
     *out = tmp;
     return true;
@@ -79,8 +84,8 @@ bool CalibStoreSave(const CalibRecord* in) {
     std::memcpy(buf + 10, &channelCount, 2);
     uint32_t payloadLen = CALIB_PAYLOAD_LEN;
     std::memcpy(buf + 12, &payloadLen, 4);
-    uint32_t reserved = 0;
-    std::memcpy(buf + 16, &reserved, 4);
+    uint16_t validMask = in->validMask;
+    std::memcpy(buf + 16, &validMask, 2);
     std::memcpy(buf + CALIB_PAYLOAD_OFFSET, in->coeff, CALIB_PAYLOAD_LEN);
 
     uint32_t crcVal = CalibCrc().Calculate(reinterpret_cast<const char*>(buf), CALIB_CRC_OFFSET);
@@ -99,6 +104,8 @@ bool CalibStoreSave(const CalibRecord* in) {
 
     CalibRecord rb;
     if (!CalibStoreLoad(&rb)) return false;
-    if (rb.board != in->board || rb.degree != in->degree || rb.channelCount != in->channelCount) return false;
+    if (rb.board != in->board || rb.degree != in->degree || rb.channelCount != in->channelCount ||
+        rb.validMask != in->validMask)
+        return false;
     return std::memcmp(rb.coeff, in->coeff, sizeof(rb.coeff)) == 0;
 }

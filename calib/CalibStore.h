@@ -16,6 +16,7 @@ struct CalibRecord {
     uint16_t board;
     uint16_t degree;
     uint16_t channelCount;
+    uint16_t validMask;
     double coeff[4][POLY_COEFF_NUM];
 };
 

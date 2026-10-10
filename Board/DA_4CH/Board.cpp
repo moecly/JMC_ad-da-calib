@@ -67,10 +67,12 @@ uint16_t Board::CalibDaRaw(uint8_t ch, uint16_t ideal) const {
         loaded = true;
         if (!CalibStoreLoad(&rec)) rec.degree = 0;
     }
-    if (rec.degree != POLY_DEGREE) return ch == kRefCh ? code_to_code(ideal) : ideal;
-    double y = PolyEval(rec.coeff[ch], (double)ideal);
-    if (y < 0.0) y = 0.0;
-    if (y > 65535.0) y = 65535.0;
-    return (uint16_t)(y + 0.5);
+    if (rec.degree == POLY_DEGREE && (rec.validMask & (1u << ch))) {
+        double y = PolyEval(rec.coeff[ch], (double)ideal);
+        if (y < 0.0) y = 0.0;
+        if (y > 65535.0) y = 65535.0;
+        return (uint16_t)(y + 0.5);
+    }
+    return ch == kRefCh ? code_to_code(ideal) : ideal;
 }
 #endif

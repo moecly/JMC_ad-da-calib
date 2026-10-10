@@ -6,11 +6,14 @@
 
 #include "Application.h"
 #include "CuteLogger/CuteLogger.h"
+#include "SysDelay.h"
 #include "at32f425_gpio.h"
 #include "at32f425_wk_config.h"
 #include "calib/CalibLink.h"
+#include "calib/CalibOps.h"
 #include "calib/CalibStore.h"
 #include "calib/PolyFit.h"
+#include "Rtt.h"
 
 #if defined(CONFIG_CALIB_ROLE_CHK) && !defined(CONFIG_DEVICE_DA_4CH)
 #error "CALIB_ROLE=CHK drives and measures DA, only valid for DA_4CH"
@@ -60,15 +63,7 @@ constexpr bool kCheckMode = true;
 constexpr bool kCheckMode = false;
 #endif
 
-constexpr uint8_t OP_PING = 0x7F;
-constexpr uint8_t OP_PONG = 0xFF;
-constexpr uint8_t OP_SET_DA = 0x01;
-constexpr uint8_t OP_ACK_SET_DA = 0x81;
-constexpr uint8_t OP_READ_AD = 0x02;
-constexpr uint8_t OP_ACK_READ_AD = 0x82;
-constexpr uint8_t OP_NACK = 0x00;
-
-enum State { S_PING, S_SWEEP, S_FIT, S_CHECK, S_DUMP, S_SAVE, S_VERIFY, S_DONE, S_FAIL };
+enum State { S_IDLE, S_PING, S_SWEEP, S_FIT, S_CHECK, S_DUMP, S_SAVE, S_VERIFY, S_DONE, S_FAIL };
 enum Phase { PH_SEND, PH_WAIT, PH_SETTLE };
 
 float s_samples[4][kGridN];
@@ -85,7 +80,7 @@ double s_coeff[4][POLY_COEFF_NUM];
 double s_chkMax[4];
 uint16_t s_chkMaxAt[4];
 
-State s_state = S_PING;
+State s_state = S_IDLE;
 Phase s_phase = PH_SEND;
 int s_sweepIdx;
 int s_stableCount;
@@ -97,6 +92,18 @@ uint32_t s_pingElapsed;
 int s_pingCount;
 uint32_t s_failMs;
 bool s_ledOn;
+
+// 上位机控制的按「连线」校准配置：每个勾选的 AD 通道配一个 REF DA 源
+struct CalibRun {
+    uint8_t adCh;
+    uint8_t daCh;
+};
+uint8_t s_chMask = 0x0F;
+uint8_t s_refDa[4] = {0, 0, 0, 0};
+CalibRun s_runs[4];
+int s_runCount = 0;
+int s_runIdx = 0;
+bool s_paused = false;
 
 Board& Bd() { return Application::GetInstance(); }
 
@@ -114,6 +121,52 @@ void LedToggle() { LedSet(!s_ledOn); }
 void EnterFail() {
     s_state = S_FAIL;
     s_failMs = 0;
+}
+
+const char* StateName() {
+    if (s_paused) return "paused";
+    switch (s_state) {
+        case S_IDLE: return "idle";
+        case S_PING: return "ping";
+        case S_SWEEP: return "sweep";
+        case S_FIT: return "fit";
+        case S_CHECK: return "check";
+        case S_DUMP: return "dump";
+        case S_SAVE: return "save";
+        case S_VERIFY: return "verify";
+        case S_DONE: return "done";
+        case S_FAIL: return "fail";
+    }
+    return "?";
+}
+
+void PrintState() {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "calib: state %s", StateName());
+    LogInfo << msg;
+}
+
+void ConfigFromMask() {
+    s_runCount = 0;
+    for (uint8_t ch = 0; ch < 4; ch++) {
+        if ((s_chMask >> ch) & 1) {
+            s_runs[s_runCount].adCh = ch;
+            s_runs[s_runCount].daCh = s_refDa[ch];
+            s_runCount++;
+        }
+    }
+}
+
+void ResetRunCounters() {
+    s_runCount = 0;
+    s_runIdx = 0;
+    s_sweepIdx = 0;
+    s_pingCount = 0;
+    s_pingElapsed = kPingIntervalMs;
+    s_retry = 0;
+    s_waitMs = 0;
+    s_verifyReported = false;
+    s_verifyIdx = 0;
 }
 
 #if defined(CONFIG_CALIB_ROLE_REF)
@@ -168,6 +221,189 @@ void RefTick() {
 
 #else
 
+#if defined(CONFIG_CALIB_ROLE_DUT)
+
+uint8_t s_cmdRx[64];
+int s_cmdLen = 0;
+
+// 阻塞 ~50ms 等 REF 的 SET_DA 应答；仅非运行态调用，不与扫描争用 CalibLink
+bool RefSetDa(uint8_t ch, uint16_t ideal) {
+    static SysDelay delay;
+    uint8_t p[4];
+    p[0] = OP_SET_DA;
+    p[1] = ch;
+    std::memcpy(p + 2, &ideal, 2);
+    CalibLinkSend(p, 4);
+    for (int i = 0; i < 50; i++) {
+        uint8_t payload[40];
+        uint8_t len;
+        if (CalibLinkRecv(payload, &len) == 0 && len >= 1) {
+            if (payload[0] == OP_ACK_SET_DA) return true;
+            if (payload[0] == OP_NACK) return false;
+        }
+        delay.DelayMs(1);
+    }
+    return false;
+}
+
+void HandleHost(const uint8_t* p, uint8_t len) {
+    char m[128];
+    switch (p[0]) {
+        case OP_HOST_CONFIG:
+            if (len >= 6) {
+                s_chMask = p[1] & 0x0F;
+                for (int i = 0; i < 4; i++) s_refDa[i] = p[2 + i] & 0x03;
+                if (s_chMask == 0) {
+                    LogError << "calib: error empty-mask";
+                } else {
+                    snprintf(m, sizeof(m), "calib: cfg mask=0x%X da=%u,%u,%u,%u", (unsigned)s_chMask,
+                             (unsigned)s_refDa[0], (unsigned)s_refDa[1], (unsigned)s_refDa[2], (unsigned)s_refDa[3]);
+                    LogInfo << m;
+                }
+            }
+            break;
+        case OP_HOST_START:
+            if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL) {
+                s_paused = false;
+                ResetRunCounters();
+                ConfigFromMask();
+                if (s_runCount == 0) {
+                    LogError << "calib: error empty-mask";
+                } else {
+                    s_state = S_PING;
+                    LogInfo << "calib: reset";
+                    PrintState();
+                }
+            } else {
+                LogError << "calib: error busy";
+            }
+            break;
+        case OP_HOST_PAUSE:
+            if (s_state != S_IDLE && s_state != S_DONE && s_state != S_FAIL) {
+                s_paused = true;
+                PrintState();
+            }
+            break;
+        case OP_HOST_RESUME:
+            s_paused = false;
+            PrintState();
+            break;
+        case OP_HOST_RESTART:
+            s_paused = false;
+            ResetRunCounters();
+            ConfigFromMask();
+            if (s_runCount == 0) {
+                LogError << "calib: error empty-mask";
+            } else {
+                s_state = S_PING;
+                LogInfo << "calib: reset";
+                PrintState();
+            }
+            break;
+        case OP_HOST_STOP:
+            s_state = S_IDLE;
+            s_paused = false;
+            s_runCount = 0;
+            s_runIdx = 0;
+            s_sweepIdx = 0;
+            PrintState();
+            break;
+        case OP_HOST_SET_DA:
+            if (len >= 4) {
+                if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL || s_paused) {
+                    uint8_t ch = p[1] & 0x03;
+                    uint16_t ideal = (uint16_t)(p[2] | (p[3] << 8));
+                    if (RefSetDa(ch, ideal)) {
+                        snprintf(m, sizeof(m), "calib: set_da ch=%u ideal=%u", (unsigned)ch, (unsigned)ideal);
+                        LogInfo << m;
+                    } else {
+                        LogError << "calib: error set_da timeout";
+                    }
+                } else {
+                    LogError << "calib: error busy";
+                }
+            }
+            break;
+        case OP_HOST_READ_AD:
+            for (uint8_t ch = 0; ch < 4; ch++) {
+                uint16_t raw = Bd().CalibAdRaw(ch);
+                float ideal = Bd().CalibAdIdeal(ch, raw);
+                snprintf(m, sizeof(m), "calib: ad ch=%u raw=%u ideal=%.1f", (unsigned)ch, (unsigned)raw, (double)ideal);
+                LogInfo << m;
+            }
+            break;
+        case OP_HOST_STATUS:
+            LogInfo << "calib: role DUT";
+            PrintState();
+            snprintf(m, sizeof(m), "calib: cfg mask=0x%X da=%u,%u,%u,%u", (unsigned)s_chMask, (unsigned)s_refDa[0],
+                     (unsigned)s_refDa[1], (unsigned)s_refDa[2], (unsigned)s_refDa[3]);
+            LogInfo << m;
+            snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
+            LogInfo << m;
+            for (uint8_t ch = 0; ch < 4; ch++) {
+                if (!(s_rec.validMask & (1u << ch))) continue;
+                char cm[128];
+                int cn = snprintf(cm, sizeof(cm), "calib: coeff ch%u", (unsigned)ch);
+                for (int k = 0; k < POLY_COEFF_NUM; k++) {
+                    cn += snprintf(cm + cn, sizeof(cm) - cn, " %.17g", s_rec.coeff[ch][k]);
+                }
+                LogInfo << cm;
+            }
+            break;
+        default:
+            LogError << "calib: error bad-op";
+            break;
+    }
+}
+
+void HostPoll() {
+    char tmp[64];
+    int n = RttRead(tmp, sizeof(tmp));
+    if (n > 0) {
+        if (s_cmdLen + n > (int)sizeof(s_cmdRx)) {
+            s_cmdLen = 0;
+        } else {
+            std::memcpy(s_cmdRx + s_cmdLen, tmp, n);
+            s_cmdLen += n;
+        }
+    }
+
+    int pos = 0;
+    while (pos < s_cmdLen) {
+        if (s_cmdRx[pos] != CALIB_FRAME_HEAD) {
+            pos++;
+            continue;
+        }
+        if (s_cmdLen - pos < 2) break;
+        uint8_t plen = s_cmdRx[pos + 1];
+        if (plen > CALIB_MAX_PAYLOAD) {
+            pos++;
+            continue;
+        }
+        int total = 2 + plen + 4;
+        if (s_cmdLen - pos < total) break;
+
+        const uint8_t* payload = s_cmdRx + pos + 2;
+        uint32_t c = 0;
+        uint8_t* cb = reinterpret_cast<uint8_t*>(&c);
+        for (int i = 0; i < 4; i++) cb[i] = s_cmdRx[pos + 2 + plen + i];
+        if (CalibCrc().Calculate(reinterpret_cast<const char*>(payload), plen) == c) {
+            HandleHost(payload, plen);
+            pos += total;
+        } else {
+            pos++;
+        }
+    }
+
+    if (pos > 0) {
+        int rem = s_cmdLen - pos;
+        if (rem > 0) std::memmove(s_cmdRx, s_cmdRx + pos, rem);
+        s_cmdLen = rem;
+    }
+}
+
+#endif  // CONFIG_CALIB_ROLE_DUT
+
 void StartPoint() {
     s_retry = 0;
     s_waitMs = 0;
@@ -177,9 +413,15 @@ void StartPoint() {
         s_stableMax[ch] = 0;
     }
 #if defined(CONFIG_DEVICE_AD_4CH)
+    if (s_sweepIdx == 0) {
+        char rm[48];
+        snprintf(rm, sizeof(rm), "calib: run ch=%u da=%u", (unsigned)s_runs[s_runIdx].adCh,
+                 (unsigned)s_runs[s_runIdx].daCh);
+        LogInfo << rm;
+    }
     uint8_t p[4];
     p[0] = OP_SET_DA;
-    p[1] = kRefCh;
+    p[1] = s_runs[s_runIdx].daCh;
     uint16_t g = kGridLive[s_sweepIdx];
     std::memcpy(p + 2, &g, 2);
     CalibLinkSend(p, 4);
@@ -338,28 +580,38 @@ void DoSweep() {
     }
 }
 
-void AdvVerifyPoint();
+#if !defined(CONFIG_CALIB_ROLE_CHK)
 
-void ChkVerifyPoint() {
+void AdvVerifyPoint() {
+    s_verifyIdx++;
+    s_stableCount = -1;
+    s_phase = PH_SEND;
+}
+
+void ChkVerifyPoint(uint8_t ch) {
     const double set = (double)kGridLive[s_verifyIdx];
-    char msg[128];
-    int n = snprintf(msg, sizeof(msg), "calib: vfy set=%u d=", (unsigned)kGridLive[s_verifyIdx]);
-    for (int ch = 0; ch < 4; ch++) {
-        double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][s_verifyIdx]) - set;
-        s_verSumSq[ch] += d * d;
-        double ad = d < 0 ? -d : d;
-        if (ad > s_verMax[ch]) {
-            s_verMax[ch] = ad;
-            s_verMaxAt[ch] = kGridLive[s_verifyIdx];
-        }
-        n += snprintf(msg + n, sizeof(msg) - n, "%s%+.1f", ch ? "," : "", d);
+    double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][s_verifyIdx]) - set;
+    s_verSumSq[ch] += d * d;
+    double ad = d < 0 ? -d : d;
+    if (ad > s_verMax[ch]) {
+        s_verMax[ch] = ad;
+        s_verMaxAt[ch] = kGridLive[s_verifyIdx];
     }
+    char msg[64];
+    snprintf(msg, sizeof(msg), "calib: vfy set=%u ch%u d=%+.1f", (unsigned)kGridLive[s_verifyIdx], (unsigned)ch, d);
     LogInfo << msg;
 }
 
 void DoVerifySweep() {
     if (s_verifyIdx >= kGridN) {
-        s_state = S_VERIFY;
+        s_runIdx++;
+        if (s_runIdx < s_runCount) {
+            s_verifyIdx = 0;
+            s_stableCount = -1;
+            s_phase = PH_SEND;
+        } else {
+            s_state = S_VERIFY;
+        }
         return;
     }
 
@@ -375,7 +627,7 @@ void DoVerifySweep() {
         }
         uint8_t p[4];
         p[0] = OP_SET_DA;
-        p[1] = kRefCh;
+        p[1] = s_runs[s_runIdx].daCh;
         uint16_t ideal = kGridLive[s_verifyIdx];
         std::memcpy(p + 2, &ideal, 2);
         CalibLinkSend(p, 4);
@@ -426,11 +678,9 @@ void DoVerifySweep() {
         s_stableCount++;
         return;
     }
-    bool settled = true;
-    for (int ch = 0; ch < 4; ch++) {
-        if (s_stableMax[ch] - s_stableMin[ch] > kStableCode) settled = false;
-        s_verify[ch][s_verifyIdx] = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
-    }
+    const uint8_t ch = s_runs[s_runIdx].adCh;
+    bool settled = s_stableMax[ch] - s_stableMin[ch] <= kStableCode;
+    s_verify[ch][s_verifyIdx] = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
     {
         char m[112];
         snprintf(m, sizeof(m), "calib: vfy%u set=%u raw=%u,%u,%u,%u%s", (unsigned)s_verifyIdx,
@@ -448,18 +698,8 @@ void DoVerifySweep() {
         LogInfo << sp;
     }
 #endif
-    ChkVerifyPoint();
+    ChkVerifyPoint(ch);
     AdvVerifyPoint();
-}
-
-void AdvVerifyPoint() {
-    s_verifyIdx++;
-    s_stableCount = -1;
-    if (s_verifyIdx >= kGridN) {
-        s_state = S_VERIFY;
-        return;
-    }
-    s_phase = PH_SEND;
 }
 
 void DoVerify() {
@@ -477,16 +717,20 @@ void DoVerify() {
     char msg[128];
     int n = snprintf(msg, sizeof(msg), "calib: verify");
     bool pass = true;
+    bool first = true;
     for (int ch = 0; ch < 4; ch++) {
+        if (!(s_chMask & (1u << ch))) continue;
         double rmse = sqrt(s_verSumSq[ch] / kGridN);
-        n += snprintf(msg + n, sizeof(msg) - n, "%s ch%d max=%.1f @set=%u rmse=%.1f", ch ? ";" : "", ch, s_verMax[ch],
+        n += snprintf(msg + n, sizeof(msg) - n, "%s ch%d max=%.1f @set=%u rmse=%.1f", first ? "" : ";", ch, s_verMax[ch],
                       (unsigned)s_verMaxAt[ch], rmse);
+        first = false;
         if (s_verMax[ch] >= kCheckGateCode) pass = false;
     }
     LogInfo << msg;
 
     bool anyBad = false;
     for (int ch = 0; ch < 4; ch++) {
+        if (!(s_chMask & (1u << ch))) continue;
         if (s_verMax[ch] < kCheckGateCode) continue;
         char ol[256];
         int m = snprintf(ol, sizeof(ol), "calib: vfy ch%d |d|>=%d at:", ch, (int)kCheckGateCode);
@@ -509,6 +753,8 @@ void DoVerify() {
     LedSet(true);
 }
 
+#endif  // !CONFIG_CALIB_ROLE_CHK
+
 // 导出采样点与系数供 PC 端复算；每 tick 只发一行，且行间留出间隔让 RTT 主机读走
 void DoDump() {
     enum { kChunkVals = 24, kStr = 200, kLineGapMs = 100 };
@@ -518,7 +764,7 @@ void DoDump() {
     }
     const int perCh = (kGridN + kChunkVals - 1) / kChunkVals;
     const int gridLines = perCh;
-    const int chLines = perCh * 4;
+    const int chLines = perCh * s_runCount;
     char dl[kStr];
 
     if (s_dumpLine < gridLines) {
@@ -535,8 +781,9 @@ void DoDump() {
 
     if (s_dumpLine < gridLines + chLines) {
         int j = s_dumpLine - gridLines;
-        int ch = j / perCh;
+        int run = j / perCh;
         int off = (j % perCh) * kChunkVals;
+        int ch = s_runs[run].adCh;
         int n = snprintf(dl, sizeof(dl), "calib: dump ch%d %d", ch, off);
         for (int i = off; i < kGridN && i < off + kChunkVals; i++) {
             n += snprintf(dl + n, sizeof(dl) - n, " %u", (unsigned)s_samples[ch][i]);
@@ -547,8 +794,9 @@ void DoDump() {
         return;
     }
 
-    if (s_dumpLine < gridLines + chLines + 4) {
-        int ch = s_dumpLine - gridLines - chLines;
+    if (s_dumpLine < gridLines + chLines + s_runCount) {
+        int run = s_dumpLine - gridLines - chLines;
+        int ch = s_runs[run].adCh;
         int n = snprintf(dl, sizeof(dl), "calib: coeff ch%d", ch);
         for (int k = 0; k < POLY_COEFF_NUM; k++) {
             n += snprintf(dl + n, sizeof(dl) - n, " %.17g", s_coeff[ch][k]);
@@ -562,52 +810,49 @@ void DoDump() {
     s_state = S_SAVE;
 }
 
-void DoFit() {
+void FitRun() {
+    const uint8_t ch = s_runs[s_runIdx].adCh;
     double xs[kGridN];
-    for (int ch = 0; ch < 4; ch++) {
-        for (int i = 0; i < kGridN; i++) {
-            xs[i] = (double)s_samples[ch][i];
+    for (int i = 0; i < kGridN; i++) {
+        xs[i] = (double)s_samples[ch][i];
+    }
+    if (!PolyFit(xs, s_gridD, kGridN, s_coeff[ch])) {
+        LogError << "calib: fit failed ch=" << (unsigned)ch;
+        EnterFail();
+        return;
+    }
+    double maxRes = 0.0;
+    double sumSq = 0.0;
+    int maxAt = 0;
+    for (int i = 0; i < kGridN; i++) {
+        double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
+        sumSq += d * d;
+        if (d < 0) d = -d;
+        if (d > maxRes) {
+            maxRes = d;
+            maxAt = i;
         }
-        if (!PolyFit(xs, s_gridD, kGridN, s_coeff[ch])) {
-            LogError << "calib: fit failed ch=" << ch;
-            EnterFail();
-            return;
-        }
-        double maxRes = 0.0;
-        double sumSq = 0.0;
-        int maxAt = 0;
-        for (int i = 0; i < kGridN; i++) {
+    }
+    char st[128];
+    snprintf(st, sizeof(st), "calib: ch%d resid max=%.1f @ideal=%u rmse=%.1f", ch, maxRes, (unsigned)kGridLive[maxAt],
+             sqrt(sumSq / kGridN));
+    LogInfo << st;
+    if (maxRes > kResidualLimitCode) {
+        char rs[256];
+        int n = snprintf(rs, sizeof(rs), "calib: ch%d resid>%d at:", ch, (int)kResidualLimitCode);
+        for (int i = 0; i < kGridN && n < (int)sizeof(rs) - 16; i++) {
             double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
-            sumSq += d * d;
             if (d < 0) d = -d;
-            if (d > maxRes) {
-                maxRes = d;
-                maxAt = i;
+            if (d > kResidualLimitCode) {
+                n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGridLive[i], d);
             }
         }
-        char st[128];
-        snprintf(st, sizeof(st), "calib: ch%d resid max=%.1f @ideal=%u rmse=%.1f",
-                 ch, maxRes, (unsigned)kGridLive[maxAt], sqrt(sumSq / kGridN));
-        LogInfo << st;
-        if (maxRes > kResidualLimitCode) {
-            char rs[256];
-            int n = snprintf(rs, sizeof(rs), "calib: ch%d resid>%d at:", ch, (int)kResidualLimitCode);
-            for (int i = 0; i < kGridN && n < (int)sizeof(rs) - 16; i++) {
-                double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
-                if (d < 0) d = -d;
-                if (d > kResidualLimitCode) {
-                    n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGridLive[i], d);
-                }
-            }
-            LogError << rs;
-            EnterFail();
-            return;
-        }
+        LogError << rs;
+        EnterFail();
+        return;
     }
 
-    for (int i = 0; i < kGridN; i++) {
-        xs[i] = (double)s_samples[kRefCh][i];
-    }
+    // anchor dev：诊断该 ch 拟合曲线与本机内建曲线的偏差
     double dev = 0.0;
     for (int i = 0; i < kGridN; i++) {
 #if defined(CONFIG_DEVICE_AD_4CH)
@@ -615,21 +860,32 @@ void DoFit() {
 #else
         double builtin = Bd().CalibBuiltinRawFromIdeal((uint16_t)xs[i]);
 #endif
-        double d = PolyEval(s_coeff[kRefCh], xs[i]) - builtin;
+        double d = PolyEval(s_coeff[ch], xs[i]) - builtin;
         if (d < 0) d = -d;
         if (d > dev) dev = d;
     }
     char devMsg[48];
-    snprintf(devMsg, sizeof(devMsg), "calib: ch%u anchor dev = %g", (unsigned)kRefCh, dev);
+    snprintf(devMsg, sizeof(devMsg), "calib: ch%u anchor dev = %g", (unsigned)ch, dev);
     LogInfo << devMsg;
 
-    s_dumpLine = 0;
-    s_dumpWait = 0;
-    s_state = S_DUMP;
+    s_runIdx++;
+    if (s_runIdx < s_runCount) {
+        s_sweepIdx = 0;
+        s_phase = PH_SEND;
+        s_state = S_SWEEP;
+    } else {
+        s_dumpLine = 0;
+        s_dumpWait = 0;
+        s_state = S_DUMP;
+    }
 }
 
 void DoSave() {
     CalibRecord rec;
+    if (!CalibStoreLoad(&rec)) {
+        rec = CalibRecord{};
+        rec.validMask = 0;
+    }
 #if defined(CONFIG_DEVICE_AD_4CH)
     rec.board = 1;
 #else
@@ -637,10 +893,12 @@ void DoSave() {
 #endif
     rec.degree = POLY_DEGREE;
     rec.channelCount = 4;
-    for (int ch = 0; ch < 4; ch++) {
+    for (int i = 0; i < s_runCount; i++) {
+        uint8_t ch = s_runs[i].adCh;
         for (int k = 0; k < POLY_COEFF_NUM; k++) {
             rec.coeff[ch][k] = s_coeff[ch][k];
         }
+        rec.validMask |= (uint16_t)(1u << ch);
     }
     if (!CalibStoreSave(&rec)) {
         LogError << "calib: flash write failed";
@@ -649,7 +907,13 @@ void DoSave() {
     }
     s_rec = rec;
     LogInfo << "calib: saved";
+    {
+        char m[48];
+        snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
+        LogInfo << m;
+    }
     s_verifyIdx = 0;
+    s_runIdx = 0;
     s_stableCount = -1;
     s_verifyReported = false;
     s_phase = PH_SEND;
@@ -677,7 +941,13 @@ void DoCheck() {
 #endif
 
 void DutTick() {
+#if defined(CONFIG_CALIB_ROLE_DUT)
+    HostPoll();
+#endif
+    if (s_paused) return;
     switch (s_state) {
+        case S_IDLE:
+            break;
         case S_PING: {
             uint8_t payload[40];
             uint8_t len;
@@ -687,6 +957,8 @@ void DutTick() {
                 } else {
                     LogInfo << "calib: role DUT";
                 }
+                ConfigFromMask();
+                s_runIdx = 0;
                 s_sweepIdx = 0;
                 s_phase = PH_SEND;
                 s_state = S_SWEEP;
@@ -710,7 +982,7 @@ void DutTick() {
             DoSweep();
             break;
         case S_FIT:
-            DoFit();
+            FitRun();
             break;
         case S_DUMP:
             DoDump();
@@ -723,6 +995,7 @@ void DutTick() {
         case S_SAVE:
             DoSave();
             break;
+#if !defined(CONFIG_CALIB_ROLE_CHK)
         case S_VERIFY:
             if (!s_verifyReported) {
                 DoVerify();
@@ -732,6 +1005,7 @@ void DutTick() {
                 DoVerifySweep();
             }
             break;
+#endif
         case S_DONE:
             LedSet(true);
             break;
@@ -764,9 +1038,19 @@ void CalibProcInit() {
     LogInfo << "calib: role REF ready";
     LedSet(true);
 #else
-    s_state = S_PING;
-    s_pingCount = 0;
-    s_pingElapsed = kPingIntervalMs;
+    if (kCheckMode) {
+        s_state = S_PING;
+        s_pingCount = 0;
+        s_pingElapsed = kPingIntervalMs;
+    } else {
+#if defined(CALIB_AUTO_START)
+        s_state = S_PING;
+        s_pingCount = 0;
+        s_pingElapsed = kPingIntervalMs;
+#else
+        s_state = S_IDLE;
+#endif
+    }
 #endif
 
     bool loaded = CalibStoreLoad(&s_rec);
@@ -775,10 +1059,12 @@ void CalibProcInit() {
     }
 #if defined(CONFIG_VERIFY_ON_BOOT)
     if (loaded) {
-        s_state = S_VERIFY;
+        ConfigFromMask();
+        s_runIdx = 0;
         s_verifyIdx = 0;
         s_stableCount = -1;
         s_verifyReported = false;
+        s_state = S_VERIFY;
     }
 #endif
 }

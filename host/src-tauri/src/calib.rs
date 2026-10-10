@@ -23,6 +23,7 @@ pub struct ChannelReport {
     pub verify_at: Option<u16>,
     pub before: Option<Stat>,
     pub after: Option<Stat>,
+    pub valid: bool,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -36,6 +37,9 @@ pub struct CalibReport {
     pub saved: bool,
     pub verify_started: bool,
     pub verify_pass: Option<bool>,
+    pub valid_mask: u16,
+    pub run_ch: Option<usize>,
+    pub ad_read: [Option<u16>; 4],
     pub errors: Vec<String>,
 }
 
@@ -47,6 +51,8 @@ static RESID_RE: LazyLock<Regex> = LazyLock::new(|| {
 static VERIFY_CH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"ch(\d+) max=([-0-9.eE+]+) @set=(\d+) rmse=([-0-9.eE+]+)").unwrap()
 });
+static RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^run ch=(\d+) da=(\d+)").unwrap());
+static AD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ad ch=(\d+) raw=(\d+)").unwrap());
 
 pub fn poly_eval(coeff: &[f64; 4], x: f64) -> f64 {
     let mut acc = 0.0;
@@ -81,28 +87,39 @@ impl Default for Parser {
     }
 }
 
+fn fresh_report() -> CalibReport {
+    let channels = (0..CHANNELS)
+        .map(|ch| ChannelReport {
+            ch,
+            ..Default::default()
+        })
+        .collect();
+    CalibReport {
+        role: None,
+        phase: "idle".to_string(),
+        points: 0,
+        total_points: TOTAL_POINTS,
+        grid: Vec::new(),
+        channels,
+        saved: false,
+        verify_started: false,
+        verify_pass: None,
+        valid_mask: 0,
+        run_ch: None,
+        ad_read: [None; 4],
+        errors: Vec::new(),
+    }
+}
+
 impl Parser {
     pub fn new() -> Self {
-        let channels = (0..CHANNELS)
-            .map(|ch| ChannelReport {
-                ch,
-                ..Default::default()
-            })
-            .collect();
         Self {
-            report: CalibReport {
-                role: None,
-                phase: "idle".to_string(),
-                points: 0,
-                total_points: TOTAL_POINTS,
-                grid: Vec::new(),
-                channels,
-                saved: false,
-                verify_started: false,
-                verify_pass: None,
-                errors: Vec::new(),
-            },
+            report: fresh_report(),
         }
+    }
+
+    fn reset_run(&mut self) {
+        self.report = fresh_report();
     }
 
     fn chan(&mut self, ch: usize) -> &mut ChannelReport {
@@ -127,6 +144,47 @@ impl Parser {
                 self.report.phase = "sweep".to_string();
             }
             self.report.role = Some(role);
+            return true;
+        }
+
+        if rest == "reset" {
+            self.reset_run();
+            return true;
+        }
+
+        if let Some(v) = rest.strip_prefix("state ") {
+            self.report.phase = v.trim().to_string();
+            return true;
+        }
+
+        if let Some(v) = rest.strip_prefix("mask ") {
+            let tok = v.trim();
+            let hex = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")).unwrap_or(tok);
+            let Ok(mask) = u16::from_str_radix(hex, 16) else {
+                return false;
+            };
+            self.report.valid_mask = mask;
+            for ch in self.report.channels.iter_mut() {
+                ch.valid = (mask >> ch.ch) & 1 == 1;
+            }
+            return true;
+        }
+
+        if rest.starts_with("cfg ") {
+            return false;
+        }
+
+        if let Some(c) = RUN_RE.captures(rest) {
+            self.report.run_ch = c[1].parse().ok();
+            return true;
+        }
+
+        if let Some(c) = AD_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch >= CHANNELS {
+                return false;
+            }
+            self.report.ad_read[ch] = Some(parse_u16(&c[2]));
             return true;
         }
 
@@ -475,6 +533,8 @@ mod tests {
         }
         lines.push(framed("DoVerify", &verify));
         lines.push(framed("DoVerify", "calib: verify PASS"));
+        lines.push(framed("HostPoll", "calib: mask 0x5"));
+        lines.push(framed("HostPoll", "calib: state done"));
         lines
     }
 
@@ -494,6 +554,11 @@ mod tests {
         assert_eq!(r.verify_pass, Some(true));
         assert_eq!(r.phase, "done");
         assert!(r.errors.is_empty());
+        assert_eq!(r.valid_mask, 0x5);
+        assert!(r.channels[0].valid);
+        assert!(!r.channels[1].valid);
+        assert!(r.channels[2].valid);
+        assert!(!r.channels[3].valid);
         for ch in &r.channels {
             assert_eq!(ch.samples.len(), TOTAL_POINTS as usize);
             // 固件 resid 以 %.1f 打印，与本机按全精度复算的值比对需容忍半个末位
@@ -522,5 +587,40 @@ mod tests {
 
         assert_eq!(parser.report.grid, grid_before);
         assert_eq!(parser.report.points, points_before);
+    }
+
+    #[test]
+    fn parses_host_control_lines() {
+        let mut parser = Parser::new();
+        assert!(parser.feed("calib: run ch=1 da=0"));
+        assert_eq!(parser.report.run_ch, Some(1));
+        assert!(parser.feed("calib: ad ch=1 raw=12345 ideal=24690.0"));
+        assert_eq!(parser.report.ad_read[1], Some(12345));
+        assert_eq!(parser.report.ad_read[0], None);
+        assert!(parser.feed("calib: mask 0x2"));
+        assert_eq!(parser.report.valid_mask, 0x2);
+        assert!(parser.feed("calib: state paused"));
+        assert_eq!(parser.report.phase, "paused");
+        assert!(!parser.feed("calib: cfg mask=0xF da=0,0,0,0"));
+    }
+
+    #[test]
+    fn reset_clears_previous_run() {
+        let mut parser = Parser::new();
+        parser.feed("calib: role DUT");
+        parser.feed("calib: pt0 ideal=0 raw=1,2,3,4");
+        parser.feed("calib: ch0 resid max=5.0 @ideal=0 rmse=3.0");
+        parser.feed("calib: saved");
+        parser.feed("calib: verify PASS");
+        assert!(parser.report.saved);
+        assert_eq!(parser.report.points, 1);
+
+        assert!(parser.feed("calib: reset"));
+        assert!(!parser.report.saved);
+        assert_eq!(parser.report.points, 0);
+        assert_eq!(parser.report.phase, "idle");
+        assert_eq!(parser.report.channels.len(), CHANNELS);
+        assert!(parser.report.channels[0].coeff.is_none());
+        assert!(parser.report.errors.is_empty());
     }
 }

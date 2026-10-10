@@ -16,7 +16,7 @@ AT32F425K8T7（Cortex-M4，裸机）多板型工业耦合器模块固件。单�
 2. `cmsis/` — 启动汇编与 `SystemInit`，编入 app。
 3. `Board/<BOARD>/` — 板级实现：`Board.h/.cpp` + 传感器/执行器驱动（`AD7689Drv`、`MS5542`）+ AT32 Workbench 生成的 `project/`。
 4. `user/` — 与板型无关的应用框架与通用组件。
-5. `calib/` — 自动校准，仅 `-DCALIB_ROLE=REF|DUT|CHK` 时编入 app：`CalibProc` 状态机、`CalibLink`（USART2 RS485）、`CalibStore`（Flash 记录）、`PolyFit`（最小二乘三次拟合）。
+5. `calib/` — 校准，仅 `-DCALIB_ROLE=REF|DUT|CHK` 时编入 app：`CalibProc` 状态机、`CalibOps.h`（RTT 下行/RS485 协议常量）、`CalibLink`（USART2 RS485）、`CalibStore`（Flash 记录 v2）、`PolyFit`（最小二乘三次拟合）。DUT 默认上电等待上位机经 RTT 下行启动（`CALIB_AUTO_START` 编译开关可恢复自动流程），支持按「连线」选择单通道校准。
 
 **两处多态**
 
@@ -48,10 +48,10 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
 | --- | --- |
 | `user/` | 应用框架：`Application`、`BaseBoard`、`CPPInterface`、`DrvInit`、`BaseTimer`、`SerialOutStream`、`FWConfig.h`、`Clock.c` |
 | `user/{CRC,CuteLogger,Delay,DigitalInFilter,Led,SoftTimer,Timer}/` | 通用组件：日志、软定时器、延时抽象、数字滤波、LED、CRC |
-| `calib/` | 自动校准，仅 `CALIB_ROLE` 非 `APP` 时编入：`CalibProc`（状态机/拟合/落盘/CHK 闭环自检/写盘后复检/dump 导出）、`CalibLink`（USART2 RS485 收发热链路）、`CalibStore`（`0x0800F000` 记录读写 + CRC-32）、`PolyFit`（三次多项式最小二乘）。每点采集 = 等 `kSettleMs` 让 DA 建压，再按 `kSampleIntervalMs` 采 `kStableCount` 次，落窗内 min/max 中值（抑制单次毛刺）；窗内极差 > `kStableCode` 仅打 `unstable` 标记，不中断。`DoFit` 全点拟合后逐通道打印 `ch%d resid max=%.1f @ideal=%u rmse=%.1f`，超 `kResidualLimitCode` 时列出全部超标点 `ideal(delta)` 并 `EnterFail()`。常量均在 `CalibProc.cpp` 顶部。DUT 落盘后自动转 `S_VERIFY` 用刚写入的记录重跑 67 点闭环（`S_DUMP` 导出采样点与系数供 PC 复算），详见 Testing & QA |
+| `calib/` | 校准，仅 `CALIB_ROLE` 非 `APP` 时编入：`CalibProc`（状态机/拟合/落盘/CHK 闭环自检/写盘后复检/dump 导出 + 上位机下行控制）、`CalibOps.h`（opcode 常量）、`CalibLink`（USART2 RS485 收发热链路）、`CalibStore`（`0x0800F000` 记录 v2 读写 + CRC-32）、`PolyFit`（三次多项式最小二乘）。状态机：`S_IDLE`（默认，等待上位机 start）→ `S_PING`→`S_SWEEP`→`S_FIT`→`S_DUMP`→`S_SAVE`→`S_VERIFY`→`S_DONE`，失败 `S_FAIL`；`CALIB_AUTO_START` 令 DUT 上电直接 `S_PING`（mask=0x0F，REF ch0）。上位机经 RTT 下行 `OP_HOST_*` 帧指定待校准 AD 通道位掩码与每通道 REF DA 源，逐「run」串行扫描/拟合（`calib: run ch= da=`）；支持暂停/继续/重启/停止，手动写码仅非运行态。每次校准只回写被标定通道的系数位（`CalibStoreLoad` 合并保留其余系数），落盘 `validMask`。每点采集 = 等 `kSettleMs` 让 DA 建压，再按 `kSampleIntervalMs` 采 `kStableCount` 次，落窗内 min/max 中值（抑制单次毛刺）；窗内极差 > `kStableCode` 仅打 `unstable` 标记，不中断。`FitRun` 对当前 run 通道打印 `ch%d resid max=%.1f @ideal=%u rmse=%.1f`，超 `kResidualLimitCode` 时列出全部超标点并 `EnterFail()`。常量均在 `CalibProc.cpp` 顶部。详见 Testing & QA |
 | `docs/` | 设计文档：`calibration-flash.md`（校准记录字节布局与系数语义） |
 | `tools/` | PC 端工具，不参与固件编译：`calib_host.py`（RS485 主控，充当校准协议的外部发起方）、`parse_calib_dump.py`（把固件 `calib: dump` 行还原成 Rust 工具输入表） |
-| `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），通过 SWD/RTT 只读解析固件 `calib:` 日志并可视化（前误差 / 拟合残差 / 复检误差 + 曲线）。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
+| `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），经 SWD/RTT **双向**控制 DUT：下行 `[0xA5,len,payload,crc32]` 命令帧（配置连线/启动/暂停/继续/重启/停止/手动写码/读 AD/查状态），上行解析固件 `calib:` 日志并可视化（前误差 / 拟合残差 / 复检误差 + 曲线 + 每通道有效性）。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
 | `Board/<BOARD>/` | 板级代码：`Board.h/.cpp`、芯片驱动、`project/` |
 | `Board/<BOARD>/project/{inc,src}/` | AT32 Workbench 生成：`main.c`、`at32f425_wk_config.c`、`at32f425_int.c`、`wk_system.c` |
 | `Board/project/` | 新板型模板/存档，**不参与编译**（`BOARD` 从不等于 `project`） |
@@ -96,10 +96,11 @@ cmake --build build/DA_4CH-CHK
 just attach build/DA_4CH-CHK/DA_4CH-CHK-Debug-v1.8.elf      # CHK 板；REF 板上电即可（REF 无日志输出）
 
 # DUT 写盘后自动复检 + dump 导出（AD_4CH=DUT, DA_4CH=REF 上电即可）
-cmake -DBOARD=AD_4CH -DCALIB_ROLE=DUT -DBUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build/AD_4CH-DUT
+# 默认 DUT 上电停在 S_IDLE 等上位机 start；加 -DCALIB_AUTO_START=1 恢复「上电即自动」全流程
+cmake -DBOARD=AD_4CH -DCALIB_ROLE=DUT -DBUILD_TYPE=Debug -DCALIB_AUTO_START=1 -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build/AD_4CH-DUT
 cmake --build build/AD_4CH-DUT
 just run build/AD_4CH-DUT/AD_4CH-DUT-Debug-v1.8.elf 2>&1 | tee /tmp/dut.log
-# 日志含: 67 点扫描 -> DoFit 残差 -> 19 行 dump(grid/ch0..3/coeff) -> saved -> 67 点复检 -> 汇总 PASS/FAIL
+# 日志含: 4×「run ch= da=」-> 各自 67 点扫描 -> FitRun 残差 -> dump(grid/chN/coeff) -> saved + `mask 0x%X` -> 逐 run 复检 -> 汇总 PASS/FAIL
 python3 tools/parse_calib_dump.py /tmp/dut.log --ch 0 > /tmp/ad0.txt
 (cd ../adc_poly_calibration && ./target/debug/adc-poly calib --input /tmp/ad0.txt \
     --mode code --x-col 0 --y-col 1 --code-min 0 --code-max 65535 --phys-min 0 --phys-max 10 --degree 3)
@@ -109,6 +110,7 @@ python3 tools/parse_calib_dump.py /tmp/dut.log --ch 0 > /tmp/ad0.txt
 # 采集链路定位（编译开关，默认全关；详见 Testing & QA）
 # -DCALIB_LOG_SPAN=1        DUT 每点追加 `calib: span%u min=… max=…`（窗内极差）
 # -DCALIB_FIXED_IDEAL=25000 67 点全钉在该 ideal 上驻留，分离「施加不稳」与「采集不稳」
+# -DCALIB_AUTO_START=1      非空 = DUT 上电自动按默认配置（4 通道，REF ch0）启动；默认等待上位机 start
 # REF 侧 `calib: set_da ch= ideal= raw=` 恒开，用于核对实际施加码
 cmake -DBOARD=AD_4CH -DCALIB_ROLE=DUT -DBUILD_TYPE=Debug -DCALIB_LOG_SPAN=1 -DCALIB_FIXED_IDEAL=25000 \
       -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build/AD_4CH-DUT-dwell
@@ -128,6 +130,8 @@ just watch                                   # watchexec 增量重建
 git add host/                 # 一次性：嵌套 flake 仅对 git 已跟踪文件可见
 just host-install             # 进 host 的 nix shell 安装前端依赖
 just host                     # 启动桌面应用；点「连接」后 RTT 日志/校准结果实时刷新
+# 连接 DUT 后：勾选 AD 通道 + 选 REF DA 源 →「配置」→「启动」；另有暂停/继续/重启/停止、手动写码/读 AD/刷新状态
+# 下行命令 [0xA5,len,payload,crc32(LE)]，opcode 见 calib/CalibOps.h 与 host/src-tauri/src/proto.rs
 just host-build               # 前端 tsc + vite 构建
 just host-test                # 日志解析器单测（无需硬件）
 
@@ -171,9 +175,10 @@ cd host && nix develop --command npm run tauri dev
 | `user/CPPInterface.{h,cpp}` | C↔C++ 桥接（`ApplicationInit`、`SwTmrTick`） |
 | `user/FWConfig.h` | 板型宏分发（新增板型必改） |
 | `Board/<BOARD>/Board.h` | 板型声明，被 `Application.h` 按 include 路径解析 |
-| `calib/CalibProc.{h,cpp}` | 校准状态机（PING→扫描→拟合→dump→落盘→复检）、LED 指示；REF/DUT/CHK 行为在此分支 |
-| `calib/CalibLink.{h,cpp}` | USART2 + DMA1_CH1 环形收、阻塞发；帧格式 `0xA5,len,payload,crc32` |
-| `calib/CalibStore.{h,cpp}` | `0x0800F000` 校准记录读写与校验，`CalibCrc()` 共享 CRC-32 实例 |
+| `calib/CalibProc.{h,cpp}` | 校准状态机（`S_IDLE`/PING→扫描→拟合→dump→落盘→复检→DONE|FAIL）、LED 指示、上位机下行命令解析（`HostPoll`/`HandleHost`）；REF/DUT/CHK 行为在此分支；DUT 支持按通道位掩码逐「run」校准、暂停/停止 |
+| `calib/CalibOps.h` | 共享 opcode 与帧常量：REF 应答协议（`OP_PING`/`OP_SET_DA`/`OP_READ_AD`/…）与上位机下行协议（`OP_HOST_CONFIG`…`OP_HOST_STATUS`） |
+| `calib/CalibLink.{h,cpp}` | USART2 + DMA1_CH1 环形收、阻塞发；帧格式 `0xA5,len,payload,crc32`（常量取自 `CalibOps.h`） |
+| `calib/CalibStore.{h,cpp}` | `0x0800F000` 校准记录 v2（含 `validMask`）读写与校验，`CalibCrc()` 共享 CRC-32 实例 |
 | `calib/PolyFit.{h,cpp}` | 三次多项式最小二乘拟合 / Horner 求值 |
 | `docs/calibration-flash.md` | 校准记录字节布局、`board` 语义、CRC 与解码示例 |
 | `tools/calib_host.py` | PC 端 RS485 主控脚本：`ping` / `set-da` / `read-ad` / `sweep`（闭环精度门限） |
@@ -181,7 +186,10 @@ cd host && nix develop --command npm run tauri dev
 | `user/DrvInit.{h,cpp}` | 外设初始化封装 |
 | `user/SoftTimer/SoftTimer.{h,cpp}` | 软定时器调度 |
 | `user/SerialOutStream.{h,cpp}` | USART4 日志环形缓冲，同时把每条日志拷进 RTT 上行通道 |
-| `user/Rtt.{h,cpp}` | SEGGER RTT 控制块 `_SEGGER_RTT` + 1 KB 无锁上行环形缓冲；日志除 USART4 外走 SWD |
+| `user/Rtt.{h,cpp}` | SEGGER RTT 控制块 `_SEGGER_RTT`（1 条 1 KB 上行 `log` + 1 条 256 B 下行 `cmd`）；日志除 USART4 外走 SWD 上行，下行经 `RttRead()` 读给 `HostPoll`（DUT） |
+| `host/src-tauri/src/proto.rs` | 上位机下行帧编码，对齐固件 `[0xA5,len,payload,crc32(LE)]`；opcode 与 `CalibOps.h` 一致 |
+| `host/src-tauri/src/rtt.rs` | probe-rs attach + RTT 双向循环：每轮下发 `commands` 队列命令（`down_channel`）再读上行（`up_channel`）切行 |
+| `host/src/components/ControlPanel.tsx` | 连线选择（AD chN←REF DA chM）+ 流程按钮 + 手动写码/读 AD + 每通道有效性状态 |
 | `user/BaseTimer.{h,cpp}` / `user/Timer/Timer.h` | 硬件定时器抽象 |
 | `include/at32f425_conf.h` | 外设/中断裁剪开关 |
 | `ldscripts/AT32F425x8_FLASH.ld` | 内存布局与堆栈下限 |
@@ -206,12 +214,12 @@ cd host && nix develop --command npm run tauri dev
 - AD 标定实测（AD_4CH=DUT, DA_4CH=REF）：**残差与 AD/DA 通道对应关系直接相关**，实测证据如下。
   - **实测对照**：4 个 AD 通道共接 1 个 DA 输出时 `ch1 resid max=28875 @58000 rmse=15436`、低段残差呈 `12500→28125` 线性递减（ch0 反而 `resid max=1.5 @37000 rmse=0.5`）；改为只接 1 路 AD 后 `resid max=1.5 / rmse=0.5`。非 ch0 通道的 ideal→raw 映射本来就只对 `kRefCh=0` 成立（无校准记录时 `CalibDaRaw` 对非 ch0 原值直通），共接时这些通道采到的不是自己被驱动的电压。
   - **共接与此前诡异现象相符（未做排除性验证，仅为假设）**：四通道同号同步的 ~160 码跳变（DA 输出缓冲的负载瞬变同时作用于 4 路）、跳变位置逐次运行随机且扫描期与复检期不重合、`kSettleMs` 加大反而更差、`FILTER_NUM` 改小无改善。
-  - **正确接法**：标定时 DUT 每个 AD 通道必须各自接到 REF 的一个独立 DA 通道；只想验证单路时只接 `kRefCh` 对应的那一路。共接时非 `kRefCh` 通道的残差会大得离谱（实测 28875 码 ≈ 44% FS），`DoFit` 对首个超 `kResidualLimitCode` 的通道 `EnterFail()` 后直接返回，不落盘任何系数——这是设计行为，看到这种量级先查接线，不要调门限。
+  - **正确接法**：标定时 DUT 每个 AD 通道必须各自接到 REF 的一个独立 DA 通道；只想验证单路时只接 `kRefCh` 对应的那一路。共接时非 `kRefCh` 通道的残差会大得离谱（实测 28875 码 ≈ 44% FS），`FitRun` 对首个超 `kResidualLimitCode` 的通道 `EnterFail()` 后直接返回，不落盘任何系数——这是设计行为，看到这种量级先查接线，不要调门限。
   - **顺带修复的独立缺陷**：`AD7689Drv::m_filterData` 从未初始化，`GetAveragerVal` 对全部 32 槽求平均，上电后第一圈（128 ms）未填满时均值混入 RAM 残留。同一次运行 `pt0 ideal=0 raw=32`，而复检同一 `set=0` 的 `vfy0 raw=201`（两次 DA 都是 0）；把 pt0 从 32 改成 201 后离线重拟合，复检低段 d 从 `+41.4/+34.5/+29.3/+17.8`（ideal 0/1000/2000/5000）降到 `+3.3/+1.0/−0.3/−1.6`。修复：`Init()` 末尾跑 `FILTER_NUM*4` 次 `Sync()` 预热，槽填满后 `cnt1` 自然回绕到 0。
   - **已用硬件数据排除的假设**：建压时间（`kSettleMs` 200→600 反而更差）；AD 盒式窗深度（`FILTER_NUM` 32→4 无改善）；通道轮转/`t_ACQ`（单通道连发绕过 4 ms 轮转无改善）；REF ACK 时序（ACK 在 `CalibDaSet()` 之后才发）；拟合方向与系数（离线逐位复算一致）；SPI 位/CFG 布局（对照 AD7689 手册 Table 13 逐位核对正确）；扫描/复检两段 `PH_SETTLE` 逐行对比一致；`s_stableCount`/`s_stableMin/Max` 初值一致；`s_rec.coeff` 与 `s_coeff` 同源（`DoSave` 只读不改）；`CalibLink` 环形缓冲与 CRC；`code_to_code()` 曲线（问题段斜率平滑单调）。
   - **残差门限**：`kResidualLimitCode` 当前为 1000（仅保证落盘），`kCheckGateCode=16` 是复检门限。单路正确接法下实测 `resid max=1.5 / rmse=0.5`，远小于门限；若实测残差仍到几十~上百码，先查 AD/DA 通道是否一一对应，不要先调门限。
   - 定位工具已内置（编译开关，默认关闭，均在 `CMakeLists.txt` 定义为 cache 变量并经 `target_compile_definitions` 传入）：`-DCALIB_LOG_SPAN=1` 让 DUT 在扫描段每点 `calib: pt…` 后追加 `calib: span%u min=… max=…`、在复检段每点 `calib: vfy…` 后追加 `calib: vspan%u min=… max=…`（四通道各自的窗内 min/max，用于判断「电平在窗内是否稳定」）；`-DCALIB_FIXED_IDEAL=<code>` 把 67 点全钉在该 ideal 上驻留（分离「施加不稳」与「采集不稳」）；`-DCALIB_SETTLE_MS=<ms>` 覆盖 `kSettleMs`；`-DAD_FILTER_NUM=<n>` 覆盖 `AD7689Drv::FILTER_NUM`（盒式窗深度）；`-DAD_BURST_SAMPLE=1` 让 `Sync()` 改走 `ReadOneChannelData()`（每通道连发 3 帧、间隔 1 ms，绕过 4 ms 轮转）。REF 侧 `OP_SET_DA` 恒打印 `calib: set_da ch= ideal= raw=`（REF 实际写给 MS5542 的码）。
-- DUT 写盘后复检（`S_VERIFY`）：用刚写入 Flash 的记录重跑 67 点闭环，每点打印 `vfy set=… d=…`，末尾 `verify ch%d max=… @set=… rmse=…` + 超 `kCheckGateCode`(16) 点清单 + `PASS`/`FAIL`。仅出日志结论，**不回滚系数**（FAIL 不擦 Flash、不改 LED）。复检 `max` 略高于扫描 `resid`（实测 164 vs 133）属训练误差→泛化误差的正常增量。`CONFIG_VERIFY_ON_BOOT` 可让上电即复检。
+- DUT 写盘后复检（`S_VERIFY`）：用刚写入 Flash 的记录逐 run 重跑 67 点闭环，每点打印 `vfy set=… ch… d=…`，末尾 `verify ch%d max=… @set=… rmse=…` + 超 `kCheckGateCode`(16) 点清单 + `PASS`/`FAIL`。仅出日志结论，**不回滚系数**（FAIL 不擦 Flash、不改 LED）。复检 `max` 略高于扫描 `resid`（实测 164 vs 133）属训练误差→泛化误差的正常增量。`CONFIG_VERIFY_ON_BOOT` 可让上电即复检。
 - `S_DUMP` 导出：每次 tick 发一行、行间 `kLineGapMs=100`，19 行（grid 3 + ch0..3 各 3 + coeff 4）约 1.9 s。**必须节流**——RTT 上行环缓仅 1024 B，一次性发完会被主机读取速率限制而丢字节（见 Runtime/Tooling 的 RTT 条目）。
 - 提交前最低要求：该板型 Debug 与 Release 均能构建通过，且 `.hex` 正常生成。
 - 发布约定：`README.md` 追加一行版本说明（历史格式 `V1.00 初版, 实现了...`），同步 `CMakeLists.txt` 的 `MAJOR`/`MINOR`。

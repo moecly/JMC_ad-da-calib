@@ -61,7 +61,7 @@ watch board role="APP":
 host-install:
     cd host && nix develop --command npm install
 
-# 启动桌面应用（RTT 只读显示固件校准日志）
+# 启动桌面应用（RTT 双向控制：下行命令 + 上行校准日志）
 host:
     cd host && nix develop --command npm run tauri dev
 

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useBackend } from "./hooks/useBackend";
 import { ConnectionBar } from "./components/ConnectionBar";
+import { ControlPanel } from "./components/ControlPanel";
 import { CalibResult } from "./components/CalibResult";
 import { ErrorChart } from "./components/ErrorChart";
 import { LogConsole } from "./components/LogConsole";
@@ -23,6 +24,7 @@ function App() {
       />
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 flex-1 flex-col overflow-auto border-r border-slate-800">
+          <ControlPanel connected={status.connected} report={report} />
           <CalibResult report={report} />
           <ErrorChart report={report} />
         </div>

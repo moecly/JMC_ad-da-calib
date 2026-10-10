@@ -5,13 +5,14 @@
 #include "CRC/CRC.h"
 #include "at32f425_dma.h"
 #include "at32f425_usart.h"
+#include "calib/CalibOps.h"
 #include "calib/CalibStore.h"
 
 namespace {
-constexpr uint8_t FRAME_HEAD = 0xA5;
+constexpr uint8_t FRAME_HEAD = CALIB_FRAME_HEAD;
 constexpr int RX_BUF_LEN = 256;
 constexpr int TX_BUF_LEN = 32;
-constexpr int MAX_PAYLOAD = 26;
+constexpr int MAX_PAYLOAD = CALIB_MAX_PAYLOAD;
 
 uint8_t s_rxBuf[RX_BUF_LEN];
 uint8_t s_txBuf[TX_BUF_LEN];

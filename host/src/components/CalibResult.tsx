@@ -43,6 +43,7 @@ export function CalibResult({ report }: Props) {
         <thead>
           <tr className="text-left text-slate-400">
             <th className="border-b border-slate-700 px-2 py-1">通道</th>
+            <th className="border-b border-slate-700 px-2 py-1">状态</th>
             <th className="border-b border-slate-700 px-2 py-1">前误差 max/rmse</th>
             <th className="border-b border-slate-700 px-2 py-1">拟合残差 max/rmse</th>
             <th className="border-b border-slate-700 px-2 py-1">复检 max/rmse</th>
@@ -53,6 +54,9 @@ export function CalibResult({ report }: Props) {
           {report.channels.map((ch) => (
             <tr key={ch.ch} className="text-slate-200">
               <td className="border-b border-slate-800 px-2 py-1 font-mono">ch{ch.ch}</td>
+              <td className="border-b border-slate-800 px-2 py-1">
+                <Badge label={ch.valid ? "已校准" : "未校准"} tone={ch.valid ? "green" : "gray"} />
+              </td>
               <td className="border-b border-slate-800 px-2 py-1 font-mono">{stat(ch.before)}</td>
               <td className="border-b border-slate-800 px-2 py-1 font-mono">{stat(ch.resid)}</td>
               <td className="border-b border-slate-800 px-2 py-1 font-mono">{stat(ch.verify)}</td>

@@ -88,8 +88,9 @@ pub fn spawn_worker(
     sink: Arc<Mutex<VecDeque<LogLine>>>,
     parser: Arc<Mutex<Parser>>,
     status: Arc<Mutex<Status>>,
+    commands: Arc<Mutex<VecDeque<Vec<u8>>>>,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || worker_loop(app, stop, probe_index, chip, sink, parser, status))
+    std::thread::spawn(move || worker_loop(app, stop, probe_index, chip, sink, parser, status, commands))
 }
 
 pub(crate) fn emit_status(
@@ -142,6 +143,7 @@ fn worker_loop(
     sink: Arc<Mutex<VecDeque<LogLine>>>,
     parser: Arc<Mutex<Parser>>,
     status: Arc<Mutex<Status>>,
+    commands: Arc<Mutex<VecDeque<Vec<u8>>>>,
 ) {
     let info = match Lister::new().list_all().into_iter().nth(probe_index) {
         Some(i) => i,
@@ -191,7 +193,7 @@ fn worker_loop(
         };
         tries = 0;
         emit_status(&app, &status, true, format!("已连接 {}", info.identifier));
-        if let Err(msg) = read_loop(&app, &stop, &mut core, &mut rtt, &sink, &parser) {
+        if let Err(msg) = read_loop(&app, &stop, &mut core, &mut rtt, &sink, &parser, &commands) {
             emit_status(&app, &status, false, msg);
             sleep(Duration::from_millis(500));
         }
@@ -205,14 +207,27 @@ fn read_loop(
     rtt: &mut Rtt,
     sink: &Arc<Mutex<VecDeque<LogLine>>>,
     parser: &Arc<Mutex<Parser>>,
+    commands: &Arc<Mutex<VecDeque<Vec<u8>>>>,
 ) -> Result<(), String> {
-    let channel = match rtt.up_channel(0) {
-        Some(c) => c,
-        None => return Err("未找到上行通道 0".to_string()),
-    };
     let mut buf = [0u8; 1024];
     let mut pending: Vec<u8> = Vec::with_capacity(PENDING_MAX);
     while !stop.load(Ordering::Relaxed) {
+        // down_channel/up_channel 均为 &mut self，不能同时持有，故每轮分别借用
+        if let Some(down) = rtt.down_channel(0) {
+            loop {
+                let frame = { commands.lock().pop_front() };
+                match frame {
+                    Some(f) => {
+                        down.write(core, &f).map_err(|e| e.to_string())?;
+                    }
+                    None => break,
+                }
+            }
+        }
+        let channel = match rtt.up_channel(0) {
+            Some(c) => c,
+            None => return Err("未找到上行通道 0".to_string()),
+        };
         let n = channel.read(core, &mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             sleep(Duration::from_millis(10));
