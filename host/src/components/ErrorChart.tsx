@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { CalibReport } from "../types";
+import { Card } from "./ui";
 
 const W = 860;
 const H = 340;
@@ -55,7 +56,7 @@ export function ErrorChart({ report }: { report: CalibReport | null }) {
   ].filter((r) => Math.abs(r.v) <= ymax);
 
   return (
-    <div className="flex flex-col gap-2 p-4">
+    <Card className="flex flex-col gap-2">
       <div className="flex items-center gap-2 text-sm">
         <span className="font-semibold text-slate-200">误差曲线</span>
         {[0, 1, 2, 3].map((c) => (
@@ -120,9 +121,15 @@ export function ErrorChart({ report }: { report: CalibReport | null }) {
               -{ymax.toFixed(0)}
             </text>
             {after.length > 0 && (
-              <polyline points={line(after)} fill="none" stroke="#22c55e" strokeWidth={1.4} />
+              <polyline
+                points={line(after)}
+                fill="none"
+                stroke="#22c55e"
+                strokeWidth={1.4}
+                strokeLinejoin="round"
+              />
             )}
-            <polyline points={line(before)} fill="none" stroke="#94a3b8" strokeWidth={1.4} />
+            <polyline points={line(before)} fill="none" stroke="#94a3b8" strokeWidth={1.4} strokeLinejoin="round" />
             {hover !== null && (
               <line
                 x1={sx(grid[hover])}
@@ -138,6 +145,6 @@ export function ErrorChart({ report }: { report: CalibReport | null }) {
       ) : (
         <div className="p-6 text-sm text-slate-500">无采样数据</div>
       )}
-    </div>
+    </Card>
   );
 }

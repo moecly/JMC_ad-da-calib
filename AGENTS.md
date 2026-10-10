@@ -16,11 +16,11 @@ AT32F425K8T7（Cortex-M4，裸机）多板型工业耦合器模块固件。单�
 2. `cmsis/` — 启动汇编与 `SystemInit`，编入 app。
 3. `Board/<BOARD>/` — 板级实现：`Board.h/.cpp` + 传感器/执行器驱动（`AD7689Drv`、`MS5542`）+ AT32 Workbench 生成的 `project/`。
 4. `user/` — 与板型无关的应用框架与通用组件。
-5. `calib/` — 校准，仅 `-DCALIB_ROLE=REF|DUT|CHK` 时编入 app：`CalibProc` 状态机、`CalibOps.h`（RTT 下行/RS485 协议常量）、`CalibLink`（USART2 RS485）、`CalibStore`（Flash 记录 v2）、`PolyFit`（最小二乘三次拟合）。DUT 默认上电等待上位机经 RTT 下行启动（`CALIB_AUTO_START` 编译开关可恢复自动流程），支持按「连线」选择单通道校准。
+5. `calib/` — 校准，仅 `-DCALIB_ROLE=REF|DUT|CHK|MANUAL` 时编入 app：`CalibProc` 状态机（三分支：`REF` 应答、`MANUAL` 单板手动校准、`DUT|CHK` 自动双板流程）、`CalibOps.h`（RTT 下行/RS485 协议常量）、`CalibLink`（USART2 RS485）、`CalibStore`（Flash 记录 v2）、`PolyFit`（最小二乘三次拟合）。DUT 默认上电等待上位机经 RTT 下行启动（`CALIB_AUTO_START` 编译开关可恢复自动流程），支持按「连线」选择单通道校准；启动前经 RS485 查询 REF 全量信息（`OP_GET_INFO`）。`MANUAL` 为单板、无 REF 的手动校准，不用 RS485。
 
 **两处多态**
 
-- 编译期：`-DCONFIG_DEVICE_<BOARD>` → `user/FWConfig.h` 展开 `CONFIG_DEVICE_NAME` / `MODULE_TYPE`。新增板型需在 `FWConfig.h` 增加分支。另有 `-DCALIB_ROLE=APP|REF|DUT|CHK`（默认 `APP`）选择校准角色；非 `APP` 时定义 `CONFIG_CALIB_ROLE_<ROLE>`、编入 `calib/` 源文件，并在产物名追加 `-<ROLE>`。
+- 编译期：`-DCONFIG_DEVICE_<BOARD>` → `user/FWConfig.h` 展开 `CONFIG_DEVICE_NAME` / `MODULE_TYPE`。新增板型需在 `FWConfig.h` 增加分支。另有 `-DCALIB_ROLE=APP|REF|DUT|CHK|MANUAL`（默认 `APP`）选择校准角色；非 `APP` 时定义 `CONFIG_CALIB_ROLE_<ROLE>`、编入 `calib/` 源文件，并在产物名追加 `-<ROLE>`。
 - 运行期：`user/BaseBoard.h` 是纯虚接口（`BoardInit()` / `HandleData()` / `OneMsTask()`）；`Board` 类由各板型目录的 `Board.h` 提供；`user/Application.h` 的 `Application : public Board`（Meyer's 单例）在 **应用目标** 里继承它。构建系统为 app 目标加入 `Board/${BOARD}` 作为 include 路径，因此 `#include "Board.h"` 随 `-DBOARD` 解析到不同实现——这是板型选择的关键机制。
 
 **启动与数据流**
@@ -48,10 +48,10 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
 | --- | --- |
 | `user/` | 应用框架：`Application`、`BaseBoard`、`CPPInterface`、`DrvInit`、`BaseTimer`、`SerialOutStream`、`FWConfig.h`、`Clock.c` |
 | `user/{CRC,CuteLogger,Delay,DigitalInFilter,Led,SoftTimer,Timer}/` | 通用组件：日志、软定时器、延时抽象、数字滤波、LED、CRC |
-| `calib/` | 校准，仅 `CALIB_ROLE` 非 `APP` 时编入：`CalibProc`（状态机/拟合/落盘/CHK 闭环自检/写盘后复检/dump 导出 + 上位机下行控制）、`CalibOps.h`（opcode 常量）、`CalibLink`（USART2 RS485 收发热链路）、`CalibStore`（`0x0800F000` 记录 v2 读写 + CRC-32）、`PolyFit`（三次多项式最小二乘）。状态机：`S_IDLE`（默认，等待上位机 start）→ `S_PING`→`S_SWEEP`→`S_FIT`→`S_DUMP`→`S_SAVE`→`S_VERIFY`→`S_DONE`，失败 `S_FAIL`；`CALIB_AUTO_START` 令 DUT 上电直接 `S_PING`（mask=0x0F，REF ch0）。上位机经 RTT 下行 `OP_HOST_*` 帧指定待校准 AD 通道位掩码与每通道 REF DA 源，逐「run」串行扫描/拟合（`calib: run ch= da=`）；支持暂停/继续/重启/停止，手动写码仅非运行态。每次校准只回写被标定通道的系数位（`CalibStoreLoad` 合并保留其余系数），落盘 `validMask`。每点采集 = 等 `kSettleMs` 让 DA 建压，再按 `kSampleIntervalMs` 采 `kStableCount` 次，落窗内 min/max 中值（抑制单次毛刺）；窗内极差 > `kStableCode` 仅打 `unstable` 标记，不中断。`FitRun` 对当前 run 通道打印 `ch%d resid max=%.1f @ideal=%u rmse=%.1f`，超 `kResidualLimitCode` 时列出全部超标点并 `EnterFail()`。常量均在 `CalibProc.cpp` 顶部。详见 Testing & QA |
+| `calib/` | 校准，仅 `CALIB_ROLE` 非 `APP` 时编入：`CalibProc`（状态机/拟合/落盘/CHK 闭环自检/写盘后复检/dump 导出 + 上位机下行控制）、`CalibOps.h`（opcode 常量）、`CalibLink`（USART2 RS485 收发热链路）、`CalibStore`（`0x0800F000` 记录 v2 读写 + CRC-32）、`PolyFit`（三次多项式最小二乘）。状态机：`S_IDLE`（默认，等待上位机 start）→ `S_PING`→`S_SWEEP`→`S_FIT`→`S_DUMP`→`S_SAVE`→`S_VERIFY`→`S_DONE`，失败 `S_FAIL`；`CALIB_AUTO_START` 令 DUT 上电直接 `S_PING`（mask=0x0F，REF ch0）。上位机经 RTT 下行 `OP_HOST_*` 帧指定待校准 AD 通道位掩码与每通道 REF DA 源，逐「run」串行扫描/拟合（`calib: run ch= da=`）；支持暂停/继续/重启/停止，手动写码仅非运行态。角色分支：`REF` 应答 DUT 的 `OP_GET_INFO`（返回板型/版本/是否已有校准记录/`validMask`）；`MANUAL` 为单板手动校准（RTT 下行 `OP_HOST_MANUAL_*`：begin/abort/set-raw/add/fit/save），AD 板逐点采集（`mpt`）、DA 板写 raw 后录实测值，拟合 `mres`、落盘 `msaved`、回读复检 `mverify`，不用 RS485。每次校准只回写被标定通道的系数位（`CalibStoreLoad` 合并保留其余系数），落盘 `validMask`。每点采集 = 等 `kSettleMs` 让 DA 建压，再按 `kSampleIntervalMs` 采 `kStableCount` 次，落窗内 min/max 中值（抑制单次毛刺）；窗内极差 > `kStableCode` 仅打 `unstable` 标记，不中断。`FitRun` 对当前 run 通道打印 `ch%d resid max=%.1f @ideal=%u rmse=%.1f`，超 `kResidualLimitCode` 时列出全部超标点并 `EnterFail()`。常量均在 `CalibProc.cpp` 顶部。详见 Testing & QA |
 | `docs/` | 设计文档：`calibration-flash.md`（校准记录字节布局与系数语义） |
 | `tools/` | PC 端工具，不参与固件编译：`calib_host.py`（RS485 主控，充当校准协议的外部发起方）、`parse_calib_dump.py`（把固件 `calib: dump` 行还原成 Rust 工具输入表） |
-| `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），经 SWD/RTT **双向**控制 DUT：下行 `[0xA5,len,payload,crc32]` 命令帧（配置连线/启动/暂停/继续/重启/停止/手动写码/读 AD/查状态），上行解析固件 `calib:` 日志并可视化（前误差 / 拟合残差 / 复检误差 + 曲线 + 每通道有效性）。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
+| `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），经 SWD/RTT **双向**控制 DUT：下行 `[0xA5,len,payload,crc32]` 命令帧（配置连线/启动/暂停/继续/重启/停止/手动写码/读 AD/查状态/复位并运行/`OP_HOST_MANUAL_*`），上行解析固件 `calib:` 日志并可视化。卡片式标签页界面（概览/自动校准/手动校准/日志）：概览卡展示 DUT 设备/版本/板型与 REF 全量信息（`calib: ref board=/no-reply` + 逐通道校准状态），手动 tab 驱动单板采集→拟合→落盘→复检，另有前误差/拟合残差/复检误差曲线。连接层：附着后强制目标运行（`core.status()/run()`）、RTT 找不到时按错误变体给排障 `hint`、`disconnect` 有界且不持 `conn` 锁。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
 | `Board/<BOARD>/` | 板级代码：`Board.h/.cpp`、芯片驱动、`project/` |
 | `Board/<BOARD>/project/{inc,src}/` | AT32 Workbench 生成：`main.c`、`at32f425_wk_config.c`、`at32f425_int.c`、`wk_system.c` |
 | `Board/project/` | 新板型模板/存档，**不参与编译**（`BOARD` 从不等于 `project`） |
@@ -69,13 +69,17 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
 # 环境（Nix flake 提供 gcc-arm-embedded-15 / cmake / ninja / just）
 direnv allow          # 或 nix develop
 
-# 配置（BOARD = Board/ 下的目录名；BUILD_TYPE = Debug|Release；CALIB_ROLE = APP|REF|DUT|CHK，默认 APP）
+# 配置（BOARD = Board/ 下的目录名；BUILD_TYPE = Debug|Release；CALIB_ROLE = APP|REF|DUT|CHK|MANUAL，默认 APP）
 cmake -DBOARD=DA_4CH -DBUILD_TYPE=Debug \
       -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build
 
 # 校准固件（REF = 参考板, DUT = 待校准板, CHK = 仅 DA 侧：自驱 67 点并比对设定值，不写 flash）
 cmake -DBOARD=DA_4CH -DCALIB_ROLE=REF -DBUILD_TYPE=Debug \
       -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build
+
+# 手动校准固件（MANUAL = 单板：AD 板外接标准源采集 / DA 板写码后万用表读实测，按上位机「手动校准」tab 逐点）
+cmake -DBOARD=AD_4CH -DCALIB_ROLE=MANUAL -DBUILD_TYPE=Debug \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/gcc.cmake -G Ninja -B build/AD_4CH-MANUAL
 
 # 构建
 cmake --build build
@@ -131,6 +135,7 @@ git add host/                 # 一次性：嵌套 flake 仅对 git 已跟踪文
 just host-install             # 进 host 的 nix shell 安装前端依赖
 just host                     # 启动桌面应用；点「连接」后 RTT 日志/校准结果实时刷新
 # 连接 DUT 后：勾选 AD 通道 + 选 REF DA 源 →「配置」→「启动」；另有暂停/继续/重启/停止、手动写码/读 AD/刷新状态
+# 连接恢复：状态『error』时点『复位并运行』；连接 MANUAL 固件后切「手动校准」tab：开始 → 采点 → 拟合 → 写入 Flash → 复检
 # 下行命令 [0xA5,len,payload,crc32(LE)]，opcode 见 calib/CalibOps.h 与 host/src-tauri/src/proto.rs
 just host-build               # 前端 tsc + vite 构建
 just host-test                # 日志解析器单测（无需硬件）
@@ -175,8 +180,8 @@ cd host && nix develop --command npm run tauri dev
 | `user/CPPInterface.{h,cpp}` | C↔C++ 桥接（`ApplicationInit`、`SwTmrTick`） |
 | `user/FWConfig.h` | 板型宏分发（新增板型必改） |
 | `Board/<BOARD>/Board.h` | 板型声明，被 `Application.h` 按 include 路径解析 |
-| `calib/CalibProc.{h,cpp}` | 校准状态机（`S_IDLE`/PING→扫描→拟合→dump→落盘→复检→DONE|FAIL）、LED 指示、上位机下行命令解析（`HostPoll`/`HandleHost`）；REF/DUT/CHK 行为在此分支；DUT 支持按通道位掩码逐「run」校准、暂停/停止 |
-| `calib/CalibOps.h` | 共享 opcode 与帧常量：REF 应答协议（`OP_PING`/`OP_SET_DA`/`OP_READ_AD`/…）与上位机下行协议（`OP_HOST_CONFIG`…`OP_HOST_STATUS`） |
+| `calib/CalibProc.{h,cpp}` | 校准状态机（`S_IDLE`/PING→扫描→拟合→dump→落盘→复检→DONE|FAIL）、LED 指示、上位机下行命令解析（`HostPoll`/`HandleHost`/`HandleManual`）；REF/DUT/CHK/MANUAL 行为在此分支；DUT 支持按通道位掩码逐「run」校准、暂停/停止；MANUAL 为单板手动校准（采集/拟合/落盘/回读复检） |
+| `calib/CalibOps.h` | 共享 opcode 与帧常量：REF 应答协议（`OP_PING`/`OP_SET_DA`/`OP_READ_AD`/`OP_GET_INFO`/…）与上位机下行协议（`OP_HOST_CONFIG`…`OP_HOST_STATUS`、`OP_HOST_MANUAL_*`） |
 | `calib/CalibLink.{h,cpp}` | USART2 + DMA1_CH1 环形收、阻塞发；帧格式 `0xA5,len,payload,crc32`（常量取自 `CalibOps.h`） |
 | `calib/CalibStore.{h,cpp}` | `0x0800F000` 校准记录 v2（含 `validMask`）读写与校验，`CalibCrc()` 共享 CRC-32 实例 |
 | `calib/PolyFit.{h,cpp}` | 三次多项式最小二乘拟合 / Horner 求值 |
@@ -188,7 +193,9 @@ cd host && nix develop --command npm run tauri dev
 | `user/SerialOutStream.{h,cpp}` | USART4 日志环形缓冲，同时把每条日志拷进 RTT 上行通道 |
 | `user/Rtt.{h,cpp}` | SEGGER RTT 控制块 `_SEGGER_RTT`（1 条 1 KB 上行 `log` + 1 条 256 B 下行 `cmd`）；日志除 USART4 外走 SWD 上行，下行经 `RttRead()` 读给 `HostPoll`（DUT） |
 | `host/src-tauri/src/proto.rs` | 上位机下行帧编码，对齐固件 `[0xA5,len,payload,crc32(LE)]`；opcode 与 `CalibOps.h` 一致 |
-| `host/src-tauri/src/rtt.rs` | probe-rs attach + RTT 双向循环：每轮下发 `commands` 队列命令（`down_channel`）再读上行（`up_channel`）切行 |
+| `host/src-tauri/src/rtt.rs` | probe-rs attach + RTT 双向循环：附着后强制目标运行，每轮下发 `commands` 队列命令（`down_channel`）再读上行（`up_channel`）切行；含控制通道（复位并运行/仅运行）、RTT 找不到的错误分类 `hint` 与有界搜索 |
+| `host/src/components/OverviewTab.tsx` | 概览卡：连接状态 + DUT 设备/版本/板型/系数 + REF 全量信息与逐通道校准状态 |
+| `host/src/components/ManualPanel.tsx` | 手动校准 tab：AD 采集点 / DA 写码录值 → 拟合 → 写入 Flash → 复检展示 |
 | `host/src/components/ControlPanel.tsx` | 连线选择（AD chN←REF DA chM）+ 流程按钮 + 手动写码/读 AD + 每通道有效性状态 |
 | `user/BaseTimer.{h,cpp}` / `user/Timer/Timer.h` | 硬件定时器抽象 |
 | `include/at32f425_conf.h` | 外设/中断裁剪开关 |

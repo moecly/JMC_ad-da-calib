@@ -21,6 +21,13 @@ export const manualSetDa = (ch: number, ideal: number) =>
   invoke<void>("manual_set_da", { ch, ideal });
 export const manualReadAd = () => invoke<void>("manual_read_ad");
 export const calibStatus = () => invoke<void>("calib_status");
+export const resetTarget = (runOnly = false) => invoke<void>("reset_target", { runOnly });
+export const manualBegin = () => invoke<void>("manual_begin");
+export const manualAbort = () => invoke<void>("manual_abort");
+export const manualSetRaw = (ch: number, raw: number) => invoke<void>("manual_set_raw", { ch, raw });
+export const manualAdd = (ch: number, ideal: number) => invoke<void>("manual_add", { ch, ideal });
+export const manualFit = () => invoke<void>("manual_fit");
+export const manualSave = () => invoke<void>("manual_save");
 
 export const onLine = (cb: (line: LogLine) => void): Promise<UnlistenFn> =>
   listen<LogLine>("rtt://line", (e) => cb(e.payload));

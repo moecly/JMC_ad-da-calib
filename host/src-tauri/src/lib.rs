@@ -3,8 +3,9 @@ mod proto;
 mod rtt;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -16,6 +17,7 @@ use rtt::{LogLine, ProbeInfo, Status};
 #[derive(Default)]
 pub struct AppState {
     conn: Mutex<Option<(std::thread::JoinHandle<()>, Arc<AtomicBool>)>>,
+    control: Arc<AtomicU8>,
     probe_name: Mutex<Option<String>>,
     status: Arc<Mutex<Status>>,
     lines: Arc<Mutex<VecDeque<LogLine>>>,
@@ -43,14 +45,28 @@ fn connect(
     probe_index: usize,
     chip: String,
 ) -> Result<(), String> {
-    let mut conn = state.conn.lock();
-    if let Some((handle, _)) = conn.as_ref() {
-        if !handle.is_finished() {
-            return Err("已连接".to_string());
+    {
+        let conn = state.conn.lock();
+        if let Some((handle, _)) = conn.as_ref() {
+            if !handle.is_finished() {
+                return Err("已连接".to_string());
+            }
         }
     }
-    if let Some((handle, _)) = conn.take() {
-        let _ = handle.join();
+    // 取出旧会话，有界等待其退出；探针卡死时旧 handle 丢弃、线程自行结束
+    if let Some((handle, _)) = state.conn.lock().take() {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            if rx.recv_timeout(Duration::from_secs(1)).is_err() {
+                return Err("探针仍被上一个会话占用（可能已卡死）：拔插探针后重试".to_string());
+            }
+        }
     }
     let name = rtt::list_probes()
         .ok()
@@ -64,6 +80,7 @@ fn connect(
     let handle = rtt::spawn_worker(
         app.clone(),
         stop.clone(),
+        state.control.clone(),
         probe_index,
         chip.clone(),
         state.lines.clone(),
@@ -71,23 +88,70 @@ fn connect(
         state.status.clone(),
         state.commands.clone(),
     );
-    *conn = Some((handle, stop));
+    *state.conn.lock() = Some((handle, stop));
     *state.probe_name.lock() = Some(name);
-    rtt::emit_status(&app, &state.status, false, format!("正在连接 {chip}…"));
+    rtt::emit_status(
+        &app,
+        &state.status,
+        Status {
+            connected: false,
+            state: "connecting".to_string(),
+            message: format!("正在连接 {chip}…"),
+            hint: None,
+            attempts: 0,
+        },
+    );
     Ok(())
 }
 
 #[tauri::command]
 fn disconnect(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    let mut conn = state.conn.lock();
-    if let Some((handle, stop)) = conn.take() {
-        stop.store(true, Ordering::Relaxed);
+    // conn.lock().take() 是临时 guard，join/recv_timeout 全程不持有 conn 锁，
+    // 否则探针卡死时会冻结所有控制按钮
+    let taken = state.conn.lock().take();
+    let Some((handle, stop)) = taken else {
+        rtt::emit_status(
+            &app,
+            &state.status,
+            Status {
+                connected: false,
+                state: "disconnected".to_string(),
+                message: "已断开".to_string(),
+                hint: None,
+                attempts: 0,
+            },
+        );
+        return Ok(());
+    };
+    stop.store(true, Ordering::Relaxed);
+    let message = if handle.is_finished() {
         let _ = handle.join();
-    }
-    drop(conn);
+        "已断开".to_string()
+    } else {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _ = handle.join();
+            let _ = tx.send(());
+        });
+        if rx.recv_timeout(Duration::from_secs(3)).is_ok() {
+            "已断开".to_string()
+        } else {
+            "已断开（探针线程仍在释放，探针可能卡死：拔插探针后重连）".to_string()
+        }
+    };
     state.commands.lock().clear();
     *state.probe_name.lock() = None;
-    rtt::emit_status(&app, &state.status, false, "已断开");
+    rtt::emit_status(
+        &app,
+        &state.status,
+        Status {
+            connected: false,
+            state: "disconnected".to_string(),
+            message,
+            hint: None,
+            attempts: 0,
+        },
+    );
     Ok(())
 }
 
@@ -187,6 +251,53 @@ fn calib_status(state: State<AppState>) -> Result<(), String> {
     push_command(&state, proto::status())
 }
 
+#[tauri::command]
+fn reset_target(_app: AppHandle, state: State<AppState>, run_only: Option<bool>) -> Result<(), String> {
+    let connected = state
+        .conn
+        .lock()
+        .as_ref()
+        .map(|(h, _)| !h.is_finished())
+        .unwrap_or(false);
+    if !connected {
+        return Err("未连接".to_string());
+    }
+    state
+        .control
+        .store(if run_only.unwrap_or(false) { 2 } else { 1 }, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn manual_begin(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::manual_begin())
+}
+
+#[tauri::command]
+fn manual_abort(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::manual_abort())
+}
+
+#[tauri::command]
+fn manual_set_raw(state: State<AppState>, ch: u8, raw: u16) -> Result<(), String> {
+    push_command(&state, proto::manual_set_raw(ch, raw))
+}
+
+#[tauri::command]
+fn manual_add(state: State<AppState>, ch: u8, ideal: u16) -> Result<(), String> {
+    push_command(&state, proto::manual_add(ch, ideal))
+}
+
+#[tauri::command]
+fn manual_fit(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::manual_fit())
+}
+
+#[tauri::command]
+fn manual_save(state: State<AppState>) -> Result<(), String> {
+    push_command(&state, proto::manual_save())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -207,7 +318,14 @@ pub fn run() {
             calib_stop,
             manual_set_da,
             manual_read_ad,
-            calib_status
+            calib_status,
+            reset_target,
+            manual_begin,
+            manual_abort,
+            manual_set_raw,
+            manual_add,
+            manual_fit,
+            manual_save
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

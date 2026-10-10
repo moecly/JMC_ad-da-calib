@@ -6,7 +6,7 @@
 #include "CuteLogger/CuteLogger.h"
 #include "DrvInit.h"
 
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_MANUAL)
 #include "calib/CalibProc.h"
 #endif
 
@@ -39,12 +39,12 @@ void Board::OneMsTask() {
     if (m_ad7689Drv) {
         m_ad7689Drv->Sync();
     }
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_MANUAL)
     CalibProcTick();
 #endif
 }
 
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_MANUAL)
 uint16_t Board::CalibAdRaw(uint8_t ch) const { return m_ad7689Drv->GetAdData()[ch]; }
 
 double Board::CalibBuiltinIdealFromRaw(uint16_t raw) const { return (double)code_to_code(raw); }

@@ -8,9 +8,9 @@ set(BOARD "DIG_8IN_8OUT_NPN" CACHE STRING "Target board")
 set(BUILD_TYPE "Debug" CACHE STRING "Build type (Debug / Release)")
 
 set(MAJOR 1)
-set(MINOR 8)
+set(MINOR 9)
 
-set(CALIB_ROLE "APP" CACHE STRING "Calibration role (APP / REF / DUT)")
+set(CALIB_ROLE "APP" CACHE STRING "Calibration role (APP / REF / DUT / CHK / MANUAL)")
 
 # 采集链路定位开关（仅 CALIB_ROLE != APP 时有意义）
 set(CALIB_LOG_SPAN "" CACHE STRING "1 = DUT 每点追加窗内极差日志")

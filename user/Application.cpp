@@ -5,7 +5,8 @@
 #include "at32f425_board.h"
 #include "at32f425_clock.h"
 
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK) || \
+    defined(CONFIG_CALIB_ROLE_MANUAL)
 #include "calib/CalibProc.h"
 #endif
 
@@ -46,7 +47,8 @@ void Application::Init() {
     BoardInit();
     TmrInit();
     EnableIrq();
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK) || \
+    defined(CONFIG_CALIB_ROLE_MANUAL)
     CalibProcInit();
 #endif
     LogInfo << "Init success";

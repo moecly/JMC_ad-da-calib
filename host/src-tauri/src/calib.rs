@@ -27,6 +27,42 @@ pub struct ChannelReport {
 }
 
 #[derive(Clone, Default, Serialize)]
+pub struct RefInfo {
+    pub board: Option<String>,
+    pub version: Option<String>,
+    pub has: bool,
+    pub valid_mask: u16,
+    pub no_reply: bool,
+}
+
+#[derive(Clone, Default, Serialize)]
+pub struct ManualPoint {
+    pub ch: usize,
+    pub n: usize,
+    pub ideal: u16,
+    pub raw: u16,
+}
+
+#[derive(Clone, Default, Serialize)]
+pub struct ManualChannel {
+    pub ch: usize,
+    pub points: Vec<ManualPoint>,
+    pub coeff: Option<[f64; 4]>,
+    pub resid: Option<Stat>,
+    pub verify: Option<Stat>,
+    pub fitted: bool,
+}
+
+#[derive(Clone, Default, Serialize)]
+pub struct ManualReport {
+    pub on: bool,
+    pub channels: Vec<ManualChannel>,
+    pub saved: bool,
+    pub verify_pass: Option<bool>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Default, Serialize)]
 pub struct CalibReport {
     pub role: Option<String>,
     pub phase: String,
@@ -41,6 +77,13 @@ pub struct CalibReport {
     pub run_ch: Option<usize>,
     pub ad_read: [Option<u16>; 4],
     pub errors: Vec<String>,
+    pub device: Option<String>,
+    pub app_version: Option<String>,
+    pub board_dir: Option<String>,
+    pub record_loaded: bool,
+    #[serde(rename = "ref")]
+    pub ref_info: Option<RefInfo>,
+    pub manual: ManualReport,
 }
 
 static PT_RE: LazyLock<Regex> =
@@ -53,6 +96,19 @@ static VERIFY_CH_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^run ch=(\d+) da=(\d+)").unwrap());
 static AD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ad ch=(\d+) raw=(\d+)").unwrap());
+static REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^ref board=(\d+) ver=(\d+)\.(\d+) has=(\d+) mask=0x([0-9A-Fa-f]+)$").unwrap()
+});
+static REF_WARN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^ref warn ch=(\d+) not calibrated$").unwrap());
+static MPT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^mpt ch=(\d+) n=(\d+) ideal=(\d+) raw=(\d+)$").unwrap());
+static MRES_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^mres ch=(\d+) n=(\d+) max=([-0-9.eE+]+) @ideal=(\d+) rmse=([-0-9.eE+]+)$").unwrap()
+});
+static MVERIFY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^mverify ch=(\d+) max=([-0-9.eE+]+) @ideal=(\d+) rmse=([-0-9.eE+]+)$").unwrap()
+});
 
 pub fn poly_eval(coeff: &[f64; 4], x: f64) -> f64 {
     let mut acc = 0.0;
@@ -87,6 +143,21 @@ impl Default for Parser {
     }
 }
 
+fn fresh_manual() -> ManualReport {
+    ManualReport {
+        on: false,
+        channels: (0..CHANNELS)
+            .map(|ch| ManualChannel {
+                ch,
+                ..Default::default()
+            })
+            .collect(),
+        saved: false,
+        verify_pass: None,
+        errors: Vec::new(),
+    }
+}
+
 fn fresh_report() -> CalibReport {
     let channels = (0..CHANNELS)
         .map(|ch| ChannelReport {
@@ -108,6 +179,12 @@ fn fresh_report() -> CalibReport {
         run_ch: None,
         ad_read: [None; 4],
         errors: Vec::new(),
+        device: None,
+        app_version: None,
+        board_dir: None,
+        record_loaded: false,
+        ref_info: None,
+        manual: fresh_manual(),
     }
 }
 
@@ -119,7 +196,16 @@ impl Parser {
     }
 
     fn reset_run(&mut self) {
-        self.report = fresh_report();
+        // 保留设备/板型/REF 摘要，避免每次 START 后概览卡闪空；run 级与 manual 清空
+        let old = std::mem::take(&mut self.report);
+        self.report = CalibReport {
+            device: old.device,
+            app_version: old.app_version,
+            board_dir: old.board_dir,
+            record_loaded: old.record_loaded,
+            ref_info: old.ref_info,
+            ..fresh_report()
+        };
     }
 
     fn chan(&mut self, ch: usize) -> &mut ChannelReport {
@@ -127,6 +213,14 @@ impl Parser {
     }
 
     pub fn feed(&mut self, message: &str) -> bool {
+        if let Some(rest) = message.strip_prefix("Device: ") {
+            if let Some((name, ver)) = rest.split_once(", App Version: ") {
+                self.report.device = Some(name.trim().to_string());
+                self.report.app_version = Some(ver.trim().to_string());
+                return true;
+            }
+            return false;
+        }
         let Some(rest) = message.strip_prefix("calib: ") else {
             return false;
         };
@@ -143,8 +237,128 @@ impl Parser {
             if role == "DUT" || role == "CHK" {
                 self.report.phase = "sweep".to_string();
             }
+            if role == "MANUAL" {
+                self.report.manual.on = true;
+            }
             self.report.role = Some(role);
             return true;
+        }
+
+        if let Some(v) = rest.strip_prefix("board ") {
+            self.report.board_dir = Some(v.trim().to_string());
+            return true;
+        }
+
+        if rest == "loaded" {
+            self.report.record_loaded = true;
+            return true;
+        }
+
+        if rest == "ref no-reply" {
+            self.report.ref_info = Some(RefInfo {
+                no_reply: true,
+                ..Default::default()
+            });
+            return true;
+        }
+        if let Some(c) = REF_RE.captures(rest) {
+            let board = match &c[1] {
+                "1" => "ad",
+                "2" => "da",
+                _ => "?",
+            };
+            self.report.ref_info = Some(RefInfo {
+                board: Some(board.to_string()),
+                version: Some(format!("{}.{}", &c[2], &c[3])),
+                has: &c[4] == "1",
+                valid_mask: u16::from_str_radix(&c[5], 16).unwrap_or(0),
+                no_reply: false,
+            });
+            return true;
+        }
+        if REF_WARN_RE.is_match(rest) {
+            self.report.errors.push(rest.to_string());
+            return true;
+        }
+
+        if rest == "mbegin" {
+            self.report.manual = fresh_manual();
+            self.report.manual.on = true;
+            self.report.phase = "manual".to_string();
+            return true;
+        }
+        if rest == "mabort" {
+            self.report.manual.on = false;
+            self.report.phase = "manual".to_string();
+            return true;
+        }
+        if rest.starts_with("mset ch=") {
+            return false;
+        }
+        if let Some(c) = MPT_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch < CHANNELS {
+                let point = ManualPoint {
+                    ch,
+                    n: parse_u16(&c[2]) as usize,
+                    ideal: parse_u16(&c[3]),
+                    raw: parse_u16(&c[4]),
+                };
+                let mc = &mut self.report.manual.channels[ch];
+                mc.points.push(point);
+                mc.fitted = false;
+            }
+            self.report.phase = "manual".to_string();
+            return true;
+        }
+        if let Some(c) = MRES_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch < CHANNELS {
+                let mc = &mut self.report.manual.channels[ch];
+                mc.resid = Some(Stat {
+                    max: parse_f64(&c[3]),
+                    rmse: parse_f64(&c[5]),
+                });
+                mc.fitted = true;
+            }
+            self.report.phase = "manual".to_string();
+            return true;
+        }
+        if rest.starts_with("mfit reject ch=") || rest.starts_with("mfit failed ch=") {
+            self.report.manual.errors.push(rest.to_string());
+            return true;
+        }
+        if rest == "msaved" {
+            self.report.manual.saved = true;
+            self.report.phase = "manual-verify".to_string();
+            return true;
+        }
+        if let Some(c) = MVERIFY_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch < CHANNELS {
+                self.report.manual.channels[ch].verify = Some(Stat {
+                    max: parse_f64(&c[2]),
+                    rmse: parse_f64(&c[4]),
+                });
+            }
+            self.report.phase = "manual-verify".to_string();
+            return true;
+        }
+        if rest == "mverify PASS" {
+            self.report.manual.verify_pass = Some(true);
+            self.report.phase = "done".to_string();
+            return true;
+        }
+        if rest == "mverify FAIL" {
+            self.report.manual.verify_pass = Some(false);
+            self.report.phase = "fail".to_string();
+            return true;
+        }
+        if let Some(err) = rest.strip_prefix("error manual-") {
+            if err == "off" || err == "busy" || err == "full" || err == "no-fit" {
+                self.report.manual.errors.push(rest.to_string());
+                return true;
+            }
         }
 
         if rest == "reset" {
@@ -340,6 +554,7 @@ impl Parser {
             return false;
         }
         self.chan(ch).coeff = Some(coeff);
+        self.report.manual.channels[ch].coeff = Some(coeff);
         true
     }
 
@@ -622,5 +837,88 @@ mod tests {
         assert_eq!(parser.report.channels.len(), CHANNELS);
         assert!(parser.report.channels[0].coeff.is_none());
         assert!(parser.report.errors.is_empty());
+    }
+
+    #[test]
+    fn parses_device_line() {
+        let mut parser = Parser::new();
+        assert!(parser.feed("Device: AD_4CH, App Version: v1.8"));
+        assert_eq!(parser.report.device.as_deref(), Some("AD_4CH"));
+        assert_eq!(parser.report.app_version.as_deref(), Some("v1.8"));
+        assert!(parser.feed("calib: board ad"));
+        assert_eq!(parser.report.board_dir.as_deref(), Some("ad"));
+        assert!(parser.feed("calib: loaded"));
+        assert!(parser.report.record_loaded);
+        assert!(!parser.feed("Device: broken"));
+    }
+
+    #[test]
+    fn parses_ref_info() {
+        let mut parser = Parser::new();
+        assert!(parser.feed("calib: ref board=2 ver=1.9 has=1 mask=0x3"));
+        let r = parser.report.ref_info.clone().unwrap();
+        assert_eq!(r.board.as_deref(), Some("da"));
+        assert_eq!(r.version.as_deref(), Some("1.9"));
+        assert!(r.has);
+        assert_eq!(r.valid_mask, 0x3);
+        assert!(!r.no_reply);
+
+        assert!(parser.feed("calib: ref warn ch=1 not calibrated"));
+        assert_eq!(parser.report.errors.len(), 1);
+
+        assert!(parser.feed("calib: ref no-reply"));
+        assert!(parser.report.ref_info.unwrap().no_reply);
+    }
+
+    #[test]
+    fn parses_manual_session() {
+        let mut parser = Parser::new();
+        assert!(parser.feed("calib: mbegin"));
+        assert!(parser.report.manual.on);
+        assert_eq!(parser.report.phase, "manual");
+        assert_eq!(parser.report.manual.channels.len(), CHANNELS);
+
+        assert!(!parser.feed("calib: mset ch=0 raw=1000"));
+
+        for n in 0..5u16 {
+            let ideal = 1000 * (n + 1);
+            let raw = 900 * (n + 1);
+            assert!(parser.feed(&format!("calib: mpt ch=0 n={} ideal={} raw={}", n + 1, ideal, raw)));
+        }
+        assert_eq!(parser.report.manual.channels[0].points.len(), 5);
+        assert_eq!(parser.report.manual.channels[0].points[4].ideal, 5000);
+        assert_eq!(parser.report.manual.channels[0].points[4].raw, 4500);
+
+        assert!(parser.feed("calib: mres ch=0 n=5 max=1.5 @ideal=5000 rmse=0.5"));
+        assert!(parser.report.manual.channels[0].fitted);
+        assert_eq!(parser.report.manual.channels[0].resid.as_ref().unwrap().max, 1.5);
+
+        assert!(parser.feed("calib: msaved"));
+        assert!(parser.report.manual.saved);
+        assert_eq!(parser.report.phase, "manual-verify");
+
+        assert!(parser.feed("calib: mask 0x1"));
+        assert_eq!(parser.report.valid_mask, 0x1);
+
+        assert!(parser.feed("calib: mverify ch=0 max=1.5 @ideal=5000 rmse=0.5"));
+        assert_eq!(parser.report.manual.channels[0].verify.as_ref().unwrap().max, 1.5);
+
+        assert!(parser.feed("calib: mverify PASS"));
+        assert_eq!(parser.report.manual.verify_pass, Some(true));
+        assert_eq!(parser.report.phase, "done");
+        assert!(parser.report.manual.errors.is_empty());
+    }
+
+    #[test]
+    fn manual_reject_keeps_points() {
+        let mut parser = Parser::new();
+        parser.feed("calib: mbegin");
+        parser.feed("calib: mpt ch=0 n=1 ideal=0 raw=0");
+        parser.feed("calib: mpt ch=0 n=2 ideal=1000 raw=900");
+        assert!(parser.feed("calib: mfit reject ch=0 n=2 span=900"));
+        assert_eq!(parser.report.manual.channels[0].points.len(), 2);
+        assert!(!parser.report.manual.channels[0].fitted);
+        assert_eq!(parser.report.manual.errors.len(), 1);
+        assert_eq!(parser.report.phase, "manual");
     }
 }

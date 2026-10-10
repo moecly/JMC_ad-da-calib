@@ -13,3 +13,10 @@ constexpr uint8_t OP_PING = 0x7F, OP_PONG = 0xFF, OP_SET_DA = 0x01, OP_ACK_SET_D
 constexpr uint8_t OP_HOST_CONFIG = 0x10, OP_HOST_START = 0x11, OP_HOST_PAUSE = 0x12, OP_HOST_RESUME = 0x13,
                   OP_HOST_RESTART = 0x14, OP_HOST_STOP = 0x15, OP_HOST_SET_DA = 0x16, OP_HOST_READ_AD = 0x17,
                   OP_HOST_STATUS = 0x18;
+
+// DUT ↔ REF 信息查询（RS485）
+constexpr uint8_t OP_GET_INFO = 0x03, OP_ACK_INFO = 0x83;
+
+// 上位机→DUT 手动校准协议（RTT 下行，单板）
+constexpr uint8_t OP_HOST_MANUAL_BEGIN = 0x20, OP_HOST_MANUAL_ABORT = 0x21, OP_HOST_MANUAL_SET_RAW = 0x22,
+                  OP_HOST_MANUAL_ADD = 0x23, OP_HOST_MANUAL_FIT = 0x24, OP_HOST_MANUAL_SAVE = 0x25;

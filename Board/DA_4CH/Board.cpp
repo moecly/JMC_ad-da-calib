@@ -4,7 +4,8 @@
 #include "DrvInit.h"
 #include "at32f425_wk_config.h"
 
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK) || \
+    defined(CONFIG_CALIB_ROLE_MANUAL)
 #include "calib/CalibProc.h"
 #endif
 
@@ -43,12 +44,14 @@ void Board::HandleData() {
 }
 
 void Board::OneMsTask() {
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK) || \
+    defined(CONFIG_CALIB_ROLE_MANUAL)
     CalibProcTick();
 #endif
 }
 
-#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK)
+#if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_CHK) || \
+    defined(CONFIG_CALIB_ROLE_MANUAL)
 void Board::CalibDaSet(uint8_t ch, uint16_t raw) {
     switch (ch) {
         case 0: m_DACS0.SetVal(raw); break;

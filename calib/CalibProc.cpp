@@ -6,6 +6,7 @@
 
 #include "Application.h"
 #include "CuteLogger/CuteLogger.h"
+#include "FWConfig.h"
 #include "SysDelay.h"
 #include "at32f425_gpio.h"
 #include "at32f425_wk_config.h"
@@ -18,6 +19,33 @@
 #if defined(CONFIG_CALIB_ROLE_CHK) && !defined(CONFIG_DEVICE_DA_4CH)
 #error "CALIB_ROLE=CHK drives and measures DA, only valid for DA_4CH"
 #endif
+
+#if defined(CONFIG_CALIB_ROLE_MANUAL) && !defined(CONFIG_DEVICE_AD_4CH) && !defined(CONFIG_DEVICE_DA_4CH)
+#error "CALIB_ROLE=MANUAL only valid for AD_4CH or DA_4CH"
+#endif
+
+#if defined(CONFIG_DEVICE_AD_4CH)
+constexpr const char* kBoardDir = "ad";
+constexpr bool kManualAd = true;
+#elif defined(CONFIG_DEVICE_DA_4CH)
+constexpr const char* kBoardDir = "da";
+constexpr bool kManualAd = false;
+#else
+constexpr const char* kBoardDir = "?";
+constexpr bool kManualAd = false;
+#endif
+
+// 与 Application::VersionPrint 同格式，供上位机正则匹配板名/版本
+void PrintDevice() {
+    char m[64];
+    if (CONFIG_MINOR_VERSION < 10)
+        snprintf(m, sizeof(m), "Device: %s, App Version: v%d.0%d", CONFIG_DEVICE_NAME, CONFIG_MAJOR_VERSION,
+                 CONFIG_MINOR_VERSION);
+    else
+        snprintf(m, sizeof(m), "Device: %s, App Version: v%d.%d", CONFIG_DEVICE_NAME, CONFIG_MAJOR_VERSION,
+                 CONFIG_MINOR_VERSION);
+    LogInfo << m;
+}
 
 namespace {
 
@@ -212,11 +240,400 @@ void RefTick() {
             CalibLinkSend(resp, 1);
 #endif
             break;
+        case OP_GET_INFO: {
+            CalibRecord r;
+            bool has = CalibStoreLoad(&r);
+#if defined(CONFIG_DEVICE_AD_4CH)
+            uint16_t board = 1;
+#else
+            uint16_t board = 2;
+#endif
+            uint16_t mask = has ? r.validMask : 0;
+            resp[0] = OP_ACK_INFO;
+            resp[1] = (uint8_t)board;
+            resp[2] = (uint8_t)CONFIG_MAJOR_VERSION;
+            resp[3] = (uint8_t)CONFIG_MINOR_VERSION;
+            resp[4] = has ? 1 : 0;
+            resp[5] = (uint8_t)POLY_DEGREE;
+            resp[6] = 4;
+            resp[7] = (uint8_t)(mask & 0xFF);
+            resp[8] = (uint8_t)(mask >> 8);
+            CalibLinkSend(resp, 9);
+            break;
+        }
         default:
             resp[0] = OP_NACK;
             CalibLinkSend(resp, 1);
             break;
     }
+}
+
+#elif defined(CONFIG_CALIB_ROLE_MANUAL)
+
+constexpr int kManualMax = 16;             // 每通道最多记录点
+constexpr int kManualMinPoints = 8;        // <8 点拒绝拟合（三次，4 点只是过拟合）
+constexpr uint32_t kManualMinSpan = 4096;  // 拟合 x 的最小跨度（码）
+
+uint8_t s_cmdRx[64];
+int s_cmdLen = 0;
+
+bool s_manualOn = false;
+bool s_sampling = false;       // AD 采集进行中
+uint16_t s_mx[4][kManualMax];  // AD: raw   ；DA: ideal
+uint16_t s_my[4][kManualMax];  // AD: ideal ；DA: raw
+int s_manualN[4];
+bool s_manualFitted[4];
+double s_mCoeff[4][POLY_COEFF_NUM];
+uint16_t s_lastRaw[4];  // DA: 最近一次写入的原始码
+int s_samplingCh = -1;
+uint16_t s_samplingIdeal = 0;
+uint32_t s_mWaitMs;
+int s_mStable;
+uint16_t s_mMin, s_mMax;
+
+// x/y 方向已按板型写入 s_mx/s_my，故 PolyFit 与残差公式对两种板型同一套：
+//   AD: x=raw  y=ideal → coeff 语义 ideal=f(raw) 对齐 CalibAdIdeal
+//   DA: x=ideal y=raw  → coeff 语义 raw=f(ideal) 对齐 CalibDaRaw
+void ManualFit() {
+    char m[96];
+    for (int ch = 0; ch < 4; ch++) {
+        int n = s_manualN[ch];
+        if (n == 0) continue;
+        double xs[kManualMax];
+        double ys[kManualMax];
+        double xmin = 1e18;
+        double xmax = -1e18;
+        for (int i = 0; i < n; i++) {
+            xs[i] = (double)s_mx[ch][i];
+            ys[i] = (double)s_my[ch][i];
+            if (xs[i] < xmin) xmin = xs[i];
+            if (xs[i] > xmax) xmax = xs[i];
+        }
+        uint32_t span = (uint32_t)(xmax - xmin);
+        if (n < kManualMinPoints || span < kManualMinSpan) {
+            s_manualFitted[ch] = false;
+            snprintf(m, sizeof(m), "calib: mfit reject ch=%u n=%u span=%u", (unsigned)ch, (unsigned)n, (unsigned)span);
+            LogInfo << m;
+            continue;
+        }
+        double coeff[POLY_COEFF_NUM];
+        if (!PolyFit(xs, ys, n, coeff)) {
+            s_manualFitted[ch] = false;
+            snprintf(m, sizeof(m), "calib: mfit failed ch=%u", (unsigned)ch);
+            LogError << m;
+            continue;
+        }
+        for (int k = 0; k < POLY_COEFF_NUM; k++) s_mCoeff[ch][k] = coeff[k];
+        s_manualFitted[ch] = true;
+        double maxRes = 0.0;
+        double sumSq = 0.0;
+        int maxAt = 0;
+        for (int i = 0; i < n; i++) {
+            double d = PolyEval(coeff, xs[i]) - ys[i];
+            sumSq += d * d;
+            double ad = d < 0 ? -d : d;
+            if (ad > maxRes) {
+                maxRes = ad;
+                maxAt = i;
+            }
+        }
+        uint16_t idealAt = kManualAd ? s_my[ch][maxAt] : s_mx[ch][maxAt];
+        snprintf(m, sizeof(m), "calib: mres ch=%u n=%u max=%.1f @ideal=%u rmse=%.1f", (unsigned)ch, (unsigned)n, maxRes,
+                 (unsigned)idealAt, sqrt(sumSq / n));
+        LogInfo << m;
+    }
+}
+
+void ManualSave() {
+    bool any = false;
+    for (int ch = 0; ch < 4; ch++) {
+        if (s_manualFitted[ch]) any = true;
+    }
+    if (!any) {
+        LogError << "calib: error manual-no-fit";
+        return;
+    }
+
+    CalibRecord rec;
+    if (!CalibStoreLoad(&rec)) {
+        rec = CalibRecord{};
+        rec.validMask = 0;
+    }
+    rec.board = kManualAd ? 1 : 2;
+    rec.degree = POLY_DEGREE;
+    rec.channelCount = 4;
+    for (int ch = 0; ch < 4; ch++) {
+        if (!s_manualFitted[ch]) continue;
+        for (int k = 0; k < POLY_COEFF_NUM; k++) rec.coeff[ch][k] = s_mCoeff[ch][k];
+        rec.validMask |= (uint16_t)(1u << ch);
+    }
+    if (!CalibStoreSave(&rec)) {
+        LogError << "calib: flash write failed";
+        return;
+    }
+    s_rec = rec;
+    LogInfo << "calib: msaved";
+    {
+        char m[48];
+        snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
+        LogInfo << m;
+    }
+
+    // 单板无自动施加源，复检 = 落盘回读 + 用回读系数复算已采点，抓「写盘损坏 / 系数错位」
+    CalibRecord rb;
+    if (!CalibStoreLoad(&rb)) {
+        LogError << "calib: mverify FAIL";
+        return;
+    }
+    bool pass = true;
+    for (int ch = 0; ch < 4; ch++) {
+        if (!s_manualFitted[ch]) continue;
+        int n = s_manualN[ch];
+        double maxRes = 0.0;
+        double sumSq = 0.0;
+        int maxAt = 0;
+        for (int i = 0; i < n; i++) {
+            double d = PolyEval(rb.coeff[ch], (double)s_mx[ch][i]) - (double)s_my[ch][i];
+            sumSq += d * d;
+            double ad = d < 0 ? -d : d;
+            if (ad > maxRes) {
+                maxRes = ad;
+                maxAt = i;
+            }
+        }
+        uint16_t idealAt = kManualAd ? s_my[ch][maxAt] : s_mx[ch][maxAt];
+        char m[96];
+        snprintf(m, sizeof(m), "calib: mverify ch=%u max=%.1f @ideal=%u rmse=%.1f", (unsigned)ch, maxRes,
+                 (unsigned)idealAt, sqrt(sumSq / n));
+        LogInfo << m;
+        if (maxRes >= kCheckGateCode) pass = false;
+    }
+    if (pass) {
+        LogInfo << "calib: mverify PASS";
+    } else {
+        LogError << "calib: mverify FAIL";
+    }
+}
+
+void HandleManual(const uint8_t* p, uint8_t len) {
+    char m[128];
+    switch (p[0]) {
+        case OP_HOST_MANUAL_BEGIN:
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+                break;
+            }
+            for (int ch = 0; ch < 4; ch++) {
+                s_manualN[ch] = 0;
+                s_manualFitted[ch] = false;
+                s_lastRaw[ch] = 0;
+            }
+            s_manualOn = true;
+            LogInfo << "calib: mbegin";
+            LogInfo << "calib: board " << kBoardDir;
+            snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
+            LogInfo << m;
+            break;
+        case OP_HOST_MANUAL_ABORT:
+            for (int ch = 0; ch < 4; ch++) {
+                s_manualN[ch] = 0;
+                s_manualFitted[ch] = false;
+            }
+            s_sampling = false;
+            s_samplingCh = -1;
+            s_manualOn = false;
+            LogInfo << "calib: mabort";
+            break;
+        case OP_HOST_MANUAL_SET_RAW:
+            if (!s_manualOn) {
+                LogError << "calib: error manual-off";
+                break;
+            }
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+                break;
+            }
+#if defined(CONFIG_DEVICE_DA_4CH)
+            if (len >= 4) {
+                uint8_t ch = p[1] & 0x03;
+                uint16_t raw = (uint16_t)(p[2] | (p[3] << 8));
+                Bd().CalibDaSet(ch, raw);
+                s_lastRaw[ch] = raw;
+                snprintf(m, sizeof(m), "calib: mset ch=%u raw=%u", (unsigned)ch, (unsigned)raw);
+                LogInfo << m;
+            } else {
+                LogError << "calib: error bad-op";
+            }
+#else
+            LogError << "calib: error bad-op";
+#endif
+            break;
+        case OP_HOST_MANUAL_ADD:
+            if (!s_manualOn) {
+                LogError << "calib: error manual-off";
+                break;
+            }
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+                break;
+            }
+            if (len < 4) break;
+            {
+                uint8_t ch = p[1] & 0x03;
+                uint16_t ideal = (uint16_t)(p[2] | (p[3] << 8));
+                if (s_manualN[ch] >= kManualMax) {
+                    LogError << "calib: error manual-full";
+                    break;
+                }
+                if (kManualAd) {
+                    s_sampling = true;
+                    s_samplingCh = ch;
+                    s_samplingIdeal = ideal;
+                    s_mWaitMs = 0;
+                    s_mStable = 0;
+                    s_mMin = 0xFFFF;
+                    s_mMax = 0;
+                } else {
+                    int n = s_manualN[ch];
+                    s_mx[ch][n] = ideal;
+                    s_my[ch][n] = s_lastRaw[ch];
+                    s_manualN[ch] = n + 1;
+                    s_manualFitted[ch] = false;
+                    snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(n + 1),
+                             (unsigned)ideal, (unsigned)s_lastRaw[ch]);
+                    LogInfo << m;
+                }
+            }
+            break;
+        case OP_HOST_MANUAL_FIT:
+            if (!s_manualOn) {
+                LogError << "calib: error manual-off";
+                break;
+            }
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+                break;
+            }
+            ManualFit();
+            break;
+        case OP_HOST_MANUAL_SAVE:
+            if (!s_manualOn) {
+                LogError << "calib: error manual-off";
+                break;
+            }
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+                break;
+            }
+            ManualSave();
+            break;
+        case OP_HOST_READ_AD:
+            for (uint8_t ch = 0; ch < 4; ch++) {
+#if defined(CONFIG_DEVICE_AD_4CH)
+                uint16_t raw = Bd().CalibAdRaw(ch);
+                float ideal = Bd().CalibAdIdeal(ch, raw);
+                snprintf(m, sizeof(m), "calib: ad ch=%u raw=%u ideal=%.1f", (unsigned)ch, (unsigned)raw, (double)ideal);
+#else
+                snprintf(m, sizeof(m), "calib: ad ch=%u raw=%u", (unsigned)ch, (unsigned)s_lastRaw[ch]);
+#endif
+                LogInfo << m;
+            }
+            break;
+        case OP_HOST_STATUS:
+            PrintDevice();
+            LogInfo << "calib: role MANUAL";
+            LogInfo << "calib: board " << kBoardDir;
+            snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
+            LogInfo << m;
+            break;
+        default:
+            LogError << "calib: error bad-op";
+            break;
+    }
+}
+
+void HostPoll() {
+    char tmp[64];
+    int n = RttRead(tmp, sizeof(tmp));
+    if (n > 0) {
+        if (s_cmdLen + n > (int)sizeof(s_cmdRx)) {
+            s_cmdLen = 0;
+        } else {
+            std::memcpy(s_cmdRx + s_cmdLen, tmp, n);
+            s_cmdLen += n;
+        }
+    }
+
+    int pos = 0;
+    while (pos < s_cmdLen) {
+        if (s_cmdRx[pos] != CALIB_FRAME_HEAD) {
+            pos++;
+            continue;
+        }
+        if (s_cmdLen - pos < 2) break;
+        uint8_t plen = s_cmdRx[pos + 1];
+        if (plen > CALIB_MAX_PAYLOAD) {
+            pos++;
+            continue;
+        }
+        int total = 2 + plen + 4;
+        if (s_cmdLen - pos < total) break;
+
+        const uint8_t* payload = s_cmdRx + pos + 2;
+        uint32_t c = 0;
+        uint8_t* cb = reinterpret_cast<uint8_t*>(&c);
+        for (int i = 0; i < 4; i++) cb[i] = s_cmdRx[pos + 2 + plen + i];
+        if (CalibCrc().Calculate(reinterpret_cast<const char*>(payload), plen) == c) {
+            HandleManual(payload, plen);
+            pos += total;
+        } else {
+            pos++;
+        }
+    }
+
+    if (pos > 0) {
+        int rem = s_cmdLen - pos;
+        if (rem > 0) std::memmove(s_cmdRx, s_cmdRx + pos, rem);
+        s_cmdLen = rem;
+    }
+}
+
+// AD 采点：与 DoSweep 的 PH_SETTLE 同节奏——先等 kSettleMs，再每 kSampleIntervalMs 采 kStableCount 次，
+// 取窗内 (min+max)/2
+void ManualTick() {
+    HostPoll();
+#if defined(CONFIG_DEVICE_AD_4CH)
+    if (!s_sampling) return;
+    s_mWaitMs++;
+    if (s_mStable == 0) {
+        if (s_mWaitMs < kSettleMs) return;
+        s_mWaitMs = 0;
+        s_mStable = 1;
+    } else if (s_mWaitMs < kSampleIntervalMs) {
+        return;
+    } else {
+        s_mWaitMs = 0;
+    }
+    uint16_t v = Bd().CalibAdRaw((uint8_t)s_samplingCh);
+    if (v < s_mMin) s_mMin = v;
+    if (v > s_mMax) s_mMax = v;
+    if (s_mStable < kStableCount) {
+        s_mStable++;
+        return;
+    }
+    uint16_t median = (uint16_t)((s_mMin + s_mMax) / 2);
+    int ch = s_samplingCh;
+    int n = s_manualN[ch];
+    s_mx[ch][n] = median;
+    s_my[ch][n] = s_samplingIdeal;
+    s_manualN[ch] = n + 1;
+    s_manualFitted[ch] = false;
+    s_sampling = false;
+    char m[80];
+    snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(n + 1),
+             (unsigned)s_samplingIdeal, (unsigned)median);
+    LogInfo << m;
+#endif
 }
 
 #else
@@ -246,6 +663,56 @@ bool RefSetDa(uint8_t ch, uint16_t ideal) {
     return false;
 }
 
+struct RefInfo {
+    uint8_t board, major, minor, has, degree, chCount;
+    uint16_t mask;
+};
+
+// 阻塞 ~50ms 等 REF 的 INFO 应答；仅非运行态调用，不与扫描争用 CalibLink
+bool RefGetInfo(RefInfo* out) {
+    static SysDelay delay;
+    uint8_t p = OP_GET_INFO;
+    CalibLinkSend(&p, 1);
+    for (int i = 0; i < 50; i++) {
+        uint8_t payload[40];
+        uint8_t len;
+        if (CalibLinkRecv(payload, &len) == 0 && len >= 9 && payload[0] == OP_ACK_INFO) {
+            out->board = payload[1];
+            out->major = payload[2];
+            out->minor = payload[3];
+            out->has = payload[4];
+            out->degree = payload[5];
+            out->chCount = payload[6];
+            out->mask = (uint16_t)(payload[7] | (payload[8] << 8));
+            return true;
+        }
+        delay.DelayMs(1);
+    }
+    return false;
+}
+
+void LogRefInfo(bool warn) {
+    RefInfo info;
+    char m[96];
+    if (!RefGetInfo(&info)) {
+        LogInfo << "calib: ref no-reply";
+        return;
+    }
+    snprintf(m, sizeof(m), "calib: ref board=%u ver=%u.%u has=%u mask=0x%X", (unsigned)info.board, (unsigned)info.major,
+             (unsigned)info.minor, (unsigned)info.has, (unsigned)info.mask);
+    LogInfo << m;
+    if (warn) {
+        for (int ch = 0; ch < 4; ch++) {
+            if (!(s_chMask & (1u << ch))) continue;
+            uint8_t da = s_refDa[ch];
+            if (!(info.mask & (1u << da))) {
+                snprintf(m, sizeof(m), "calib: ref warn ch=%u not calibrated", (unsigned)da);
+                LogInfo << m;
+            }
+        }
+    }
+}
+
 void HandleHost(const uint8_t* p, uint8_t len) {
     char m[128];
     switch (p[0]) {
@@ -261,6 +728,7 @@ void HandleHost(const uint8_t* p, uint8_t len) {
                     LogInfo << m;
                 }
             }
+            if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL || s_paused) LogRefInfo(true);
             break;
         case OP_HOST_START:
             if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL) {
@@ -349,6 +817,7 @@ void HandleHost(const uint8_t* p, uint8_t len) {
                 }
                 LogInfo << cm;
             }
+            if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL || s_paused) LogRefInfo(true);
             break;
         default:
             LogError << "calib: error bad-op";
@@ -958,6 +1427,7 @@ void DutTick() {
                     LogInfo << "calib: role DUT";
                 }
                 ConfigFromMask();
+                LogRefInfo(true);
                 s_runIdx = 0;
                 s_sweepIdx = 0;
                 s_phase = PH_SEND;
@@ -1024,7 +1494,9 @@ void DutTick() {
 }  // namespace
 
 void CalibProcInit() {
+#if !defined(CONFIG_CALIB_ROLE_MANUAL)
     CalibLinkInit();
+#endif
 #if defined(CALIB_FIXED_IDEAL)
     for (int i = 0; i < kGridN; i++) {
         kGridLive[i] = (uint16_t)(CALIB_FIXED_IDEAL);
@@ -1034,6 +1506,17 @@ void CalibProcInit() {
         s_gridD[i] = (double)kGridLive[i];
     }
 
+#if defined(CONFIG_CALIB_ROLE_MANUAL)
+    PrintDevice();
+    LogInfo << "calib: role MANUAL";
+    LogInfo << "calib: board " << kBoardDir;
+    CalibStoreLoad(&s_rec);
+    {
+        char m[48];
+        snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
+        LogInfo << m;
+    }
+#else
 #if defined(CONFIG_CALIB_ROLE_REF)
     LogInfo << "calib: role REF ready";
     LedSet(true);
@@ -1057,6 +1540,8 @@ void CalibProcInit() {
     if (loaded) {
         LogInfo << "calib: loaded";
     }
+    PrintDevice();
+    LogInfo << "calib: board " << kBoardDir;
 #if defined(CONFIG_VERIFY_ON_BOOT)
     if (loaded) {
         ConfigFromMask();
@@ -1067,11 +1552,14 @@ void CalibProcInit() {
         s_state = S_VERIFY;
     }
 #endif
+#endif
 }
 
 void CalibProcTick() {
 #if defined(CONFIG_CALIB_ROLE_REF)
     RefTick();
+#elif defined(CONFIG_CALIB_ROLE_MANUAL)
+    ManualTick();
 #else
     DutTick();
 #endif

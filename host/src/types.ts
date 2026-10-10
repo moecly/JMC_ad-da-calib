@@ -25,6 +25,38 @@ export interface ChannelReport {
   valid: boolean;
 }
 
+export interface RefInfo {
+  board: string | null;
+  version: string | null;
+  has: boolean;
+  valid_mask: number;
+  no_reply: boolean;
+}
+
+export interface ManualPoint {
+  ch: number;
+  n: number;
+  ideal: number;
+  raw: number;
+}
+
+export interface ManualChannel {
+  ch: number;
+  points: ManualPoint[];
+  coeff: [number, number, number, number] | null;
+  resid: Stat | null;
+  verify: Stat | null;
+  fitted: boolean;
+}
+
+export interface ManualReport {
+  on: boolean;
+  channels: ManualChannel[];
+  saved: boolean;
+  verify_pass: boolean | null;
+  errors: string[];
+}
+
 export interface CalibReport {
   role: string | null;
   phase: string;
@@ -39,6 +71,12 @@ export interface CalibReport {
   run_ch: number | null;
   ad_read: (number | null)[];
   errors: string[];
+  device: string | null;
+  app_version: string | null;
+  board_dir: string | null;
+  record_loaded: boolean;
+  ref: RefInfo | null;
+  manual: ManualReport;
 }
 
 export interface ProbeInfo {
@@ -49,7 +87,10 @@ export interface ProbeInfo {
 
 export interface Status {
   connected: boolean;
+  state: string;
   message: string;
+  hint: string | null;
+  attempts: number;
 }
 
 export interface Snapshot {
