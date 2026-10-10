@@ -113,7 +113,7 @@ export function ManualPanel({ connected, report }: { connected: boolean; report:
         {boardDir === "ad" ? (
           <div className="mt-4 flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-3">
-              <Button size="sm" disabled={!connected || !isManualFw} onClick={() => run(api.manualReadAd)}>
+              <Button size="sm" disabled={!connected || !isManualFw} onClick={() => run(() => api.manualReadAd(1))}>
                 读当前码
               </Button>
               <span className="font-mono tabular-nums text-xs text-ink-soft">

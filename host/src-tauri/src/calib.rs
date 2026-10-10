@@ -98,12 +98,14 @@ static VERIFY_CH_RE: LazyLock<Regex> = LazyLock::new(|| {
 static RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^run ch=(\d+) da=(\d+)").unwrap());
 static AD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ad ch=(\d+) raw=(\d+)").unwrap());
 static DPT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^dpt(\d+) ch=(\d+) ideal=(\d+) meas=(\d+)").unwrap());
+    LazyLock::new(|| Regex::new(r"^dpt(\d+) ch=(\d+) ideal=(\d+) meas=([-0-9.eE+]+)").unwrap());
 static DVFY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^dvfy(\d+) ch=(\d+) set=(\d+) meas=([-0-9.eE+]+)").unwrap()
 });
 static REFAD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^refad ch=(\d+) ideal=([-0-9.eE+]+)$").unwrap());
+static REFAD_RAW_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^refad ch=(\d+) raw=(\d+)$").unwrap());
 static REF_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^ref board=(\d+) ver=(\d+)\.(\d+) has=(\d+) mask=0x([0-9A-Fa-f]+)$").unwrap()
 });
@@ -444,6 +446,15 @@ impl Parser {
         }
 
         if let Some(c) = AD_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch >= CHANNELS {
+                return false;
+            }
+            self.report.ad_read[ch] = Some(parse_u16(&c[2]) as f64);
+            return true;
+        }
+
+        if let Some(c) = REFAD_RAW_RE.captures(rest) {
             let ch = parse_u16(&c[1]) as usize;
             if ch >= CHANNELS {
                 return false;

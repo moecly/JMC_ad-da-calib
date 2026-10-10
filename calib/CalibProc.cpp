@@ -246,11 +246,13 @@ void RefTick() {
         case OP_SET_DA:
 #if defined(CONFIG_DEVICE_DA_4CH)
             if (len >= 4) {
-                uint16_t ideal;
-                std::memcpy(&ideal, payload + 2, 2);
-                uint16_t rawToSet = Bd().CalibDaRaw(payload[1], ideal);
+                uint16_t v;
+                std::memcpy(&v, payload + 2, 2);
+                uint8_t mode = len >= 5 ? (uint8_t)(payload[4] & 1) : OP_MODE_CAL;
+                uint16_t rawToSet = mode == OP_MODE_CAL ? Bd().CalibDaRaw(payload[1], v) : v;
                 Bd().CalibDaSet(payload[1], rawToSet);
-                LogInfo << "calib: set_da ch=" << (unsigned)payload[1] << " ideal=" << ideal << " raw=" << rawToSet;
+                LogInfo << "calib: set_da ch=" << (unsigned)payload[1] << " mode=" << (unsigned)mode << " in=" << v
+                        << " raw=" << rawToSet;
                 resp[0] = OP_ACK_SET_DA;
             } else {
                 resp[0] = OP_NACK;
@@ -263,11 +265,19 @@ void RefTick() {
         case OP_READ_AD:
 #if defined(CONFIG_DEVICE_AD_4CH)
             resp[0] = OP_ACK_READ_AD;
-            for (int ch = 0; ch < 4; ch++) {
-                float v = Bd().CalibAdIdeal(ch, Bd().CalibAdRaw(ch));
-                std::memcpy(resp + 1 + 4 * ch, &v, 4);
+            if (len >= 2 && (payload[1] & 1) == OP_MODE_RAW) {
+                for (int ch = 0; ch < 4; ch++) {
+                    uint16_t r = Bd().CalibAdRaw((uint8_t)ch);
+                    std::memcpy(resp + 1 + 2 * ch, &r, 2);
+                }
+                CalibLinkSend(resp, 9);
+            } else {
+                for (int ch = 0; ch < 4; ch++) {
+                    float v = Bd().CalibAdIdeal(ch, Bd().CalibAdRaw(ch));
+                    std::memcpy(resp + 1 + 4 * ch, &v, 4);
+                }
+                CalibLinkSend(resp, 17);
             }
-            CalibLinkSend(resp, 17);
 #else
             resp[0] = OP_NACK;
             CalibLinkSend(resp, 1);
@@ -740,13 +750,14 @@ uint8_t s_cmdRx[64];
 int s_cmdLen = 0;
 
 // 阻塞 ~50ms 等 REF 的 SET_DA 应答；仅非运行态调用，不与扫描争用 CalibLink
-bool RefSetDa(uint8_t ch, uint16_t ideal) {
+bool RefSetDa(uint8_t ch, uint16_t v, uint8_t mode) {
     static SysDelay delay;
-    uint8_t p[4];
+    uint8_t p[5];
     p[0] = OP_SET_DA;
     p[1] = ch;
-    std::memcpy(p + 2, &ideal, 2);
-    CalibLinkSend(p, 4);
+    std::memcpy(p + 2, &v, 2);
+    p[4] = (uint8_t)(mode & 1);
+    CalibLinkSend(p, 5);
     for (int i = 0; i < 50; i++) {
         uint8_t payload[40];
         uint8_t len;
@@ -760,15 +771,31 @@ bool RefSetDa(uint8_t ch, uint16_t ideal) {
 }
 
 // 阻塞 ~50ms 等 REF 的 READ_AD 应答；仅非运行态调用，不与扫描争用 CalibLink
-bool RefReadAd(float* out4) {
+bool RefReadAdIdeal(float* out4) {
     static SysDelay delay;
-    uint8_t p[1] = {OP_READ_AD};
-    CalibLinkSend(p, 1);
+    uint8_t p[2] = {OP_READ_AD, OP_MODE_CAL};
+    CalibLinkSend(p, 2);
     for (int i = 0; i < 50; i++) {
         uint8_t payload[40];
         uint8_t len;
         if (CalibLinkRecv(payload, &len) == 0 && len >= 17 && payload[0] == OP_ACK_READ_AD) {
             for (int ch = 0; ch < 4; ch++) std::memcpy(out4 + ch, payload + 1 + 4 * ch, 4);
+            return true;
+        }
+        delay.DelayMs(1);
+    }
+    return false;
+}
+
+bool RefReadAdRaw(uint16_t* out4) {
+    static SysDelay delay;
+    uint8_t p[2] = {OP_READ_AD, OP_MODE_RAW};
+    CalibLinkSend(p, 2);
+    for (int i = 0; i < 50; i++) {
+        uint8_t payload[40];
+        uint8_t len;
+        if (CalibLinkRecv(payload, &len) == 0 && len >= 9 && payload[0] == OP_ACK_READ_AD) {
+            for (int ch = 0; ch < 4; ch++) std::memcpy(out4 + ch, payload + 1 + 2 * ch, 2);
             return true;
         }
         delay.DelayMs(1);
@@ -843,16 +870,26 @@ void HandleHost(const uint8_t* p, uint8_t len) {
                 if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL || s_paused) {
                     uint8_t ch = p[1] & 0x03;
                     uint16_t v = (uint16_t)(p[2] | (p[3] << 8));
+                    uint8_t mode = len >= 5 ? (uint8_t)(p[4] & 1) : OP_MODE_RAW;
 #if defined(CONFIG_DEVICE_AD_4CH)
-                    if (RefSetDa(ch, v)) {
-                        snprintf(m, sizeof(m), "calib: set_da ch=%u ideal=%u", (unsigned)ch, (unsigned)v);
+                    if (RefSetDa(ch, v, mode)) {
+                        if (mode == OP_MODE_CAL) {
+                            snprintf(m, sizeof(m), "calib: set_da ch=%u ideal=%u", (unsigned)ch, (unsigned)v);
+                        } else {
+                            snprintf(m, sizeof(m), "calib: set_da ch=%u raw=%u", (unsigned)ch, (unsigned)v);
+                        }
                         LogInfo << m;
                     } else {
                         LogError << "calib: error set_da timeout";
                     }
 #else
-                    Bd().CalibDaSet(ch, v);
-                    snprintf(m, sizeof(m), "calib: set_da ch=%u raw=%u", (unsigned)ch, (unsigned)v);
+                    uint16_t raw = mode == OP_MODE_CAL ? Bd().CalibDaRaw(ch, v) : v;
+                    Bd().CalibDaSet(ch, raw);
+                    if (mode == OP_MODE_CAL) {
+                        snprintf(m, sizeof(m), "calib: set_da ch=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)v, (unsigned)raw);
+                    } else {
+                        snprintf(m, sizeof(m), "calib: set_da ch=%u raw=%u", (unsigned)ch, (unsigned)raw);
+                    }
                     LogInfo << m;
 #endif
                 } else {
@@ -860,20 +897,35 @@ void HandleHost(const uint8_t* p, uint8_t len) {
                 }
             }
             break;
-        case OP_HOST_READ_AD:
+        case OP_HOST_READ_AD: {
+            uint8_t mode = len >= 2 ? (uint8_t)(p[1] & 1) : OP_MODE_CAL;
 #if defined(CONFIG_DEVICE_AD_4CH)
             for (uint8_t ch = 0; ch < 4; ch++) {
                 uint16_t raw = Bd().CalibAdRaw(ch);
-                float ideal = Bd().CalibAdIdeal(ch, raw);
-                snprintf(m, sizeof(m), "calib: ad ch=%u raw=%u ideal=%.1f", (unsigned)ch, (unsigned)raw, (double)ideal);
+                if (mode == OP_MODE_RAW) {
+                    snprintf(m, sizeof(m), "calib: ad ch=%u raw=%u", (unsigned)ch, (unsigned)raw);
+                } else {
+                    float ideal = Bd().CalibAdIdeal(ch, raw);
+                    snprintf(m, sizeof(m), "calib: ad ch=%u raw=%u ideal=%.1f", (unsigned)ch, (unsigned)raw, (double)ideal);
+                }
                 LogInfo << m;
             }
 #else
             if (s_state != S_IDLE && s_state != S_DONE && s_state != S_FAIL && !s_paused) {
                 LogError << "calib: error busy";
+            } else if (mode == OP_MODE_RAW) {
+                uint16_t r[4];
+                if (!RefReadAdRaw(r)) {
+                    LogError << "calib: error read_ad timeout";
+                } else {
+                    for (uint8_t ch = 0; ch < 4; ch++) {
+                        snprintf(m, sizeof(m), "calib: refad ch=%u raw=%u", (unsigned)ch, (unsigned)r[ch]);
+                        LogInfo << m;
+                    }
+                }
             } else {
                 float v[4];
-                if (!RefReadAd(v)) {
+                if (!RefReadAdIdeal(v)) {
                     LogError << "calib: error read_ad timeout";
                 } else {
                     for (uint8_t ch = 0; ch < 4; ch++) {
@@ -884,6 +936,7 @@ void HandleHost(const uint8_t* p, uint8_t len) {
             }
 #endif
             break;
+        }
         case OP_HOST_STATUS:
             LogInfo << "calib: role DUT";
             PrintState();
@@ -1162,8 +1215,8 @@ void DoSweep() {
                 s_samples[ch][s_sweepIdx] = mid;
                 bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
                 char m[112];
-                snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%u%s", (unsigned)s_sweepIdx, (unsigned)ch,
-                         (unsigned)kGridLive[s_sweepIdx], (unsigned)mid, settled ? "" : " unstable");
+                snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
+                         (unsigned)kGridLive[s_sweepIdx], (double)mid, settled ? "" : " unstable");
                 LogInfo << m;
             }
         }
@@ -1212,8 +1265,8 @@ void DoSweep() {
             float mid = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
             s_samples[ch][s_sweepIdx] = mid;
             char m[112];
-            snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%u%s", (unsigned)s_sweepIdx, (unsigned)ch,
-                     (unsigned)kGridLive[s_sweepIdx], (unsigned)mid, settled ? "" : " unstable");
+            snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
+                     (unsigned)kGridLive[s_sweepIdx], (double)mid, settled ? "" : " unstable");
             LogInfo << m;
         }
 #if defined(CALIB_LOG_SPAN)
@@ -1389,8 +1442,8 @@ void DoVerifySweep() {
             s_verify[ch][s_verifyIdx] = s_measMid[src];
             bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
             char m[112];
-            snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%u%s", (unsigned)s_verifyIdx, (unsigned)ch,
-                     (unsigned)kGridLive[s_verifyIdx], (unsigned)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");
+            snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%.1f%s", (unsigned)s_verifyIdx, (unsigned)ch,
+                     (unsigned)kGridLive[s_verifyIdx], (double)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");
             LogInfo << m;
             ChkVerifyPoint(ch);
         }
@@ -1425,8 +1478,8 @@ void DoVerifySweep() {
         bool settled = s_stableMax[ch] - s_stableMin[ch] <= kStableCode;
         s_verify[ch][s_verifyIdx] = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
         char m[112];
-        snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%u%s", (unsigned)s_verifyIdx, (unsigned)ch,
-                 (unsigned)kGridLive[s_verifyIdx], (unsigned)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");
+        snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%.1f%s", (unsigned)s_verifyIdx, (unsigned)ch,
+                 (unsigned)kGridLive[s_verifyIdx], (double)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");
         LogInfo << m;
         ChkVerifyPoint(ch);
     }

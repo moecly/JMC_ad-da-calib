@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { CalibReport } from "../types";
 import * as api from "../lib/ipc";
-import { Button, Card, CardTitle, Input, Pill, Select } from "./ui";
+import { Button, Card, CardTitle, Input, Pill, Segmented, Select } from "./ui";
 import { ChannelLinkMatrix } from "./ChannelLinkMatrix";
 
 interface Props {
@@ -14,6 +14,7 @@ export function ControlPanel({ connected, report }: Props) {
   const [daSel, setDaSel] = useState<number[]>([0, 0, 0, 0]);
   const [manualCh, setManualCh] = useState(0);
   const [manualIdeal, setManualIdeal] = useState(25000);
+  const [manualMode, setManualMode] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const run = (fn: () => Promise<void>) => {
@@ -94,6 +95,14 @@ export function ControlPanel({ connected, report }: Props) {
             </option>
           ))}
         </Select>
+        <Segmented
+          options={[
+            { value: 0, label: "raw" },
+            { value: 1, label: "校准后" },
+          ]}
+          value={manualMode}
+          onChange={setManualMode}
+        />
         <Input
           type="number"
           min={0}
@@ -103,14 +112,18 @@ export function ControlPanel({ connected, report }: Props) {
           disabled={!connected}
           onChange={(e) => setManualIdeal(Number(e.currentTarget.value))}
         />
-        <Button size="sm" disabled={!connected} onClick={() => run(() => api.manualSetDa(manualCh, manualIdeal))}>
-          {dutIsDa ? "写本机 DA raw" : "写码"}
+        <Button
+          size="sm"
+          disabled={!connected}
+          onClick={() => run(() => api.manualSetDa(manualCh, manualIdeal, manualMode))}
+        >
+          {manualMode === 1 ? (dutIsDa ? "写本机 DA ideal" : "写 REF DA ideal") : dutIsDa ? "写本机 DA raw" : "写 REF DA raw"}
         </Button>
-        <Button size="sm" disabled={!connected} onClick={() => run(api.manualReadAd)}>
-          {dutIsDa ? "读 REF AD" : "读 AD"}
+        <Button size="sm" disabled={!connected} onClick={() => run(() => api.manualReadAd(manualMode))}>
+          {dutIsDa ? (manualMode === 1 ? "读 REF AD ideal" : "读 REF AD raw") : "读 AD"}
         </Button>
         <span className="font-mono tabular-nums text-ink-soft">
-          {adRead.map((v, i) => `ch${i}:${v == null ? "—" : dutIsDa ? v.toFixed(1) : String(v)}`).join("  ")}
+          {adRead.map((v, i) => `ch${i}:${v == null ? "—" : dutIsDa && manualMode === 1 ? v.toFixed(1) : String(v)}`).join("  ")}
         </span>
       </div>
 

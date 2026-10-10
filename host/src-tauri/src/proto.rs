@@ -54,12 +54,12 @@ pub fn stop() -> Vec<u8> {
     frame(&[OP_HOST_STOP])
 }
 
-pub fn set_da(ch: u8, ideal: u16) -> Vec<u8> {
-    frame(&[OP_HOST_SET_DA, ch, (ideal & 0xFF) as u8, (ideal >> 8) as u8])
+pub fn set_da(ch: u8, val: u16, mode: u8) -> Vec<u8> {
+    frame(&[OP_HOST_SET_DA, ch, (val & 0xFF) as u8, (val >> 8) as u8, mode & 1])
 }
 
-pub fn read_ad() -> Vec<u8> {
-    frame(&[OP_HOST_READ_AD])
+pub fn read_ad(mode: u8) -> Vec<u8> {
+    frame(&[OP_HOST_READ_AD, mode & 1])
 }
 
 pub fn status() -> Vec<u8> {
@@ -111,8 +111,8 @@ mod tests {
     #[test]
     fn payload_encodings() {
         assert_eq!(&config(0x2, [1, 2, 3, 4])[2..8], &[OP_HOST_CONFIG, 0x2, 1, 2, 3, 4]);
-        assert_eq!(&set_da(1, 25000)[2..6], &[OP_HOST_SET_DA, 1, 0xA8, 0x61]);
-        assert_eq!(&read_ad()[2..3], &[OP_HOST_READ_AD]);
+        assert_eq!(&set_da(1, 25000, 1)[2..7], &[OP_HOST_SET_DA, 1, 0xA8, 0x61, 1]);
+        assert_eq!(&read_ad(0)[2..4], &[OP_HOST_READ_AD, 0]);
         assert_eq!(&status()[2..3], &[OP_HOST_STATUS]);
         assert_eq!(&verify()[2..3], &[OP_HOST_VERIFY]);
         assert_eq!(&manual_set_raw(2, 40000)[2..6], &[0x22, 2, 0x40, 0x9C]);

@@ -237,13 +237,13 @@ fn calib_stop(state: State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn manual_set_da(state: State<AppState>, ch: u8, ideal: u16) -> Result<(), String> {
-    push_command(&state, proto::set_da(ch & 0x03, ideal))
+fn manual_set_da(state: State<AppState>, ch: u8, val: u16, mode: u8) -> Result<(), String> {
+    push_command(&state, proto::set_da(ch & 0x03, val, mode))
 }
 
 #[tauri::command]
-fn manual_read_ad(state: State<AppState>) -> Result<(), String> {
-    push_command(&state, proto::read_ad())
+fn manual_read_ad(state: State<AppState>, mode: u8) -> Result<(), String> {
+    push_command(&state, proto::read_ad(mode))
 }
 
 #[tauri::command]

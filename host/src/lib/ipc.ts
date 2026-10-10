@@ -17,9 +17,9 @@ export const calibPause = () => invoke<void>("calib_pause");
 export const calibResume = () => invoke<void>("calib_resume");
 export const calibRestart = () => invoke<void>("calib_restart");
 export const calibStop = () => invoke<void>("calib_stop");
-export const manualSetDa = (ch: number, ideal: number) =>
-  invoke<void>("manual_set_da", { ch, ideal });
-export const manualReadAd = () => invoke<void>("manual_read_ad");
+export const manualSetDa = (ch: number, val: number, mode: number) =>
+  invoke<void>("manual_set_da", { ch, val, mode });
+export const manualReadAd = (mode: number) => invoke<void>("manual_read_ad", { mode });
 export const calibStatus = () => invoke<void>("calib_status");
 export const calibVerify = (mask: number, refDa: number[]) =>
   invoke<void>("calib_verify", { mask, refDa });
