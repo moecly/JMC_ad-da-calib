@@ -56,3 +56,20 @@ info:
 watch board role="APP":
     watchexec -e c,h,cpp,hpp,ld 'cmake --build build/{{board}}-{{role}}'
 
+# 上位机（host/，Tauri）：先 git add host/ 让嵌套 flake 可见，再进 host 的 nix shell
+# 安装前端依赖
+host-install:
+    cd host && nix develop --command npm install
+
+# 启动桌面应用（RTT 只读显示固件校准日志）
+host:
+    cd host && nix develop --command npm run tauri dev
+
+# 前端构建（tsc + vite）
+host-build:
+    cd host && nix develop --command npm run build
+
+# 日志解析器单测（无需硬件）
+host-test:
+    cd host && nix develop --command cargo test --manifest-path src-tauri/Cargo.toml
+

@@ -51,6 +51,7 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
 | `calib/` | 自动校准，仅 `CALIB_ROLE` 非 `APP` 时编入：`CalibProc`（状态机/拟合/落盘/CHK 闭环自检/写盘后复检/dump 导出）、`CalibLink`（USART2 RS485 收发热链路）、`CalibStore`（`0x0800F000` 记录读写 + CRC-32）、`PolyFit`（三次多项式最小二乘）。每点采集 = 等 `kSettleMs` 让 DA 建压，再按 `kSampleIntervalMs` 采 `kStableCount` 次，落窗内 min/max 中值（抑制单次毛刺）；窗内极差 > `kStableCode` 仅打 `unstable` 标记，不中断。`DoFit` 全点拟合后逐通道打印 `ch%d resid max=%.1f @ideal=%u rmse=%.1f`，超 `kResidualLimitCode` 时列出全部超标点 `ideal(delta)` 并 `EnterFail()`。常量均在 `CalibProc.cpp` 顶部。DUT 落盘后自动转 `S_VERIFY` 用刚写入的记录重跑 67 点闭环（`S_DUMP` 导出采样点与系数供 PC 复算），详见 Testing & QA |
 | `docs/` | 设计文档：`calibration-flash.md`（校准记录字节布局与系数语义） |
 | `tools/` | PC 端工具，不参与固件编译：`calib_host.py`（RS485 主控，充当校准协议的外部发起方）、`parse_calib_dump.py`（把固件 `calib: dump` 行还原成 Rust 工具输入表） |
+| `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），通过 SWD/RTT 只读解析固件 `calib:` 日志并可视化（前误差 / 拟合残差 / 复检误差 + 曲线）。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
 | `Board/<BOARD>/` | 板级代码：`Board.h/.cpp`、芯片驱动、`project/` |
 | `Board/<BOARD>/project/{inc,src}/` | AT32 Workbench 生成：`main.c`、`at32f425_wk_config.c`、`at32f425_int.c`、`wk_system.c` |
 | `Board/project/` | 新板型模板/存档，**不参与编译**（`BOARD` 从不等于 `project`） |
@@ -120,6 +121,21 @@ just attach   build/DA_4CH-Debug-v1.8.elf   # 不下载，仅连上看 RTT 日�
 just erase | reset | info
 just watch                                   # watchexec 增量重建
 ```
+
+上位机（`host/`，独立于固件工具链，自带 `flake.nix`）：
+
+```bash
+git add host/                 # 一次性：嵌套 flake 仅对 git 已跟踪文件可见
+just host-install             # 进 host 的 nix shell 安装前端依赖
+just host                     # 启动桌面应用；点「连接」后 RTT 日志/校准结果实时刷新
+just host-build               # 前端 tsc + vite 构建
+just host-test                # 日志解析器单测（无需硬件）
+
+# 等价手动方式
+cd host && nix develop --command npm run tauri dev
+```
+
+- 上位机用 probe-rs 独占探针，运行期间**不要**同时执行 `just run` / `just attach`；无硬件时用界面「加载日志」回放 `just run … | tee dut.log` 的日志。
 
 - 版本号在 `CMakeLists.txt` 的 `MAJOR` / `MINOR`，会进入产物文件名与 `CONFIG_*_VERSION` 宏；`FWConfig.h` 有独立兜底默认值，改版本需两处一致。
 - `.vscode/tasks.json` 列出了 8 个板型的 Configure 任务，但多数板型目录已不存在——**以 `Board/` 实际目录为准**。
