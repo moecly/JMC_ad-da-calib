@@ -125,6 +125,24 @@ bool s_ledOn;
 bool s_awaitReply = false;
 float s_measMin[4];
 float s_measMax[4];
+float s_measMid[4];
+float s_measWin[4][kStableCount];
+// REF 的 AD 值是 32 槽均值滤波的输出：单个坏样本（SPI/通道切换毛刺）进入后会把整窗抬升
+// ~5000/32≈156 码并持续 128 ms。采样间隔取 20 ms、窗长 320 ms 跨过滤波长度 + 取中值，
+// 使少数被污染的样本无法改变结果（实测复检随机 ~150~260 码超差即源于此）
+constexpr uint32_t kRefSampleIntervalMs = 20;
+static inline float MedianWin(float* v, int n) {
+    for (int i = 1; i < n; i++) {
+        float key = v[i];
+        int j = i - 1;
+        while (j >= 0 && v[j] > key) {
+            v[j + 1] = v[j];
+            j--;
+        }
+        v[j + 1] = key;
+    }
+    return 0.5f * (v[n / 2 - 1] + v[n / 2]);
+}
 // AD 方向并行：本点需驱动的 REF DA 通道去重列表与已收 ACK 数
 uint8_t s_driveCh[4];
 int s_driveCount = 0;
@@ -1046,9 +1064,8 @@ void DoSweep() {
 #else
         // DA 方向：交替「发 OP_READ_AD → 收 ACK」攒窗，每点 kStableCount 次往返
         if (!s_awaitReply) {
-            // REF 的 AD 盒式滤波每 4ms 才刷新一次本通道，背靠背读会拿到同一快照，
-            // 单次跳变不会被 min/max 窗抹平；采样间留 kSampleIntervalMs 跨刷新周期
-            if (s_stableCount > 0 && s_waitMs < kSampleIntervalMs) {
+            // 采样间留 kRefSampleIntervalMs，使窗长(16×20ms=320ms)跨过 REF 的 128ms 均值滤波
+            if (s_stableCount > 0 && s_waitMs < kRefSampleIntervalMs) {
                 s_waitMs++;
                 return;
             }
@@ -1078,6 +1095,7 @@ void DoSweep() {
         for (int ch = 0; ch < 4; ch++) {
             float v;
             std::memcpy(&v, payload + 1 + 4 * ch, 4);
+            s_measWin[ch][s_stableCount] = v;
             if (s_stableCount == 0) {
                 s_measMin[ch] = v;
                 s_measMax[ch] = v;
@@ -1088,9 +1106,12 @@ void DoSweep() {
         }
         s_stableCount++;
         if (s_stableCount < kStableCount) return;
+        for (int ch = 0; ch < 4; ch++) {
+            s_measMid[ch] = MedianWin(s_measWin[ch], kStableCount);
+        }
         if (kCheckMode) {
             for (int ch = 0; ch < 4; ch++) {
-                s_samples[ch][s_sweepIdx] = 0.5f * (s_measMin[ch] + s_measMax[ch]);
+                s_samples[ch][s_sweepIdx] = s_measMid[ch];
             }
             char raw[96];
             snprintf(raw, sizeof(raw), "calib: raw m=%.1f,%.1f,%.1f,%.1f", (double)s_samples[0][s_sweepIdx],
@@ -1102,7 +1123,7 @@ void DoSweep() {
             for (int r = 0; r < s_runCount; r++) {
                 uint8_t ch = s_runs[r].adCh;
                 int src = s_runs[r].daCh;
-                float mid = 0.5f * (s_measMin[src] + s_measMax[src]);
+                float mid = s_measMid[src];
                 s_samples[ch][s_sweepIdx] = mid;
                 bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
                 char m[112];
@@ -1282,8 +1303,8 @@ void DoVerifySweep() {
 #else
         // DA 方向：交替「发 OP_READ_AD → 收 ACK」攒窗
         if (!s_awaitReply) {
-            // 同 DoSweep：采样间留 kSampleIntervalMs，跨过 REF AD 的 4ms 刷新周期
-            if (s_stableCount > 0 && s_waitMs < kSampleIntervalMs) {
+            // 同 DoSweep：采样间留 kRefSampleIntervalMs，让窗跨过 REF 的 128ms 均值滤波
+            if (s_stableCount > 0 && s_waitMs < kRefSampleIntervalMs) {
                 s_waitMs++;
                 return;
             }
@@ -1313,6 +1334,7 @@ void DoVerifySweep() {
         for (int ch = 0; ch < 4; ch++) {
             float v;
             std::memcpy(&v, payload + 1 + 4 * ch, 4);
+            s_measWin[ch][s_stableCount] = v;
             if (s_stableCount == 0) {
                 s_measMin[ch] = v;
                 s_measMax[ch] = v;
@@ -1323,10 +1345,13 @@ void DoVerifySweep() {
         }
         s_stableCount++;
         if (s_stableCount < kStableCount) return;
+        for (int ch = 0; ch < 4; ch++) {
+            s_measMid[ch] = MedianWin(s_measWin[ch], kStableCount);
+        }
         for (int r = 0; r < s_runCount; r++) {
             uint8_t ch = s_runs[r].adCh;
             int src = s_runs[r].daCh;
-            s_verify[ch][s_verifyIdx] = 0.5f * (s_measMin[src] + s_measMax[src]);
+            s_verify[ch][s_verifyIdx] = s_measMid[src];
             bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
             char m[112];
             snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%u%s", (unsigned)s_verifyIdx, (unsigned)ch,
