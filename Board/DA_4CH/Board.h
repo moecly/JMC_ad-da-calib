@@ -19,7 +19,6 @@ public:
 #if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || \
     defined(CONFIG_CALIB_ROLE_MANUAL)
     void CalibDaSet(uint8_t ch, uint16_t raw);
-    double CalibBuiltinRawFromIdeal(uint16_t ideal) const;
     uint16_t CalibDaRaw(uint8_t ch, uint16_t ideal) const;
 #endif
 

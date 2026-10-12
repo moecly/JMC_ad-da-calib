@@ -23,7 +23,6 @@ public:
 
 #if defined(CONFIG_CALIB_ROLE_REF) || defined(CONFIG_CALIB_ROLE_DUT) || defined(CONFIG_CALIB_ROLE_MANUAL)
     uint16_t CalibAdRaw(uint8_t ch) const;
-    double CalibBuiltinIdealFromRaw(uint16_t raw) const;
     float CalibAdIdeal(uint8_t ch, uint16_t raw) const;
 #endif
 

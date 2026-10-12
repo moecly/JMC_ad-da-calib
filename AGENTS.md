@@ -37,10 +37,10 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
              → SoftTimerTick(tick) → 软定时器链表 → Board::OneMsTask()
 ```
 
-- 采样链路（AD）：`Board::OneMsTask() → AD7689Drv::Sync()`（SPI1 读取 + 滑动平均，深度 `AD7689Drv::FILTER_NUM`，每 1ms 轮转一路、4ms 一轮四路）→ `HandleData()` 取 `GetAdData()` → `code_to_code()` 三次多项式标定 → 输出。`FILTER_NUM` 越大越稳但滞后越久，改它会同时移动标定所需的建压等待 `kSettleMs`。
+- 采样链路（AD）：`Board::OneMsTask() → AD7689Drv::Sync()`（SPI1 读取 + 滑动平均，深度 `AD7689Drv::FILTER_NUM`，每 1ms 轮转一路、4ms 一轮四路）→ `HandleData()` 取 `GetAdData()` → 输出。`FILTER_NUM` 越大越稳但滞后越久，改它会同时移动标定所需的建压等待 `kSettleMs`。
 - 输出链路（DA）：`HandleData() → MS5542::SetVal()`（SPI1 写入，四路独立 CS）。
 - 日志：`LogInfo << "x = " << x;` → `CuteLogger` RAII 临时对象析构时提交 → `Logger` 单例 → `SerialOutStream` 环形缓冲（10×200B）→ 主循环非阻塞发送到 USART4。中断内**不得**直接阻塞写串口，只入队。单条格式 `[LEVEL] 文件名:行号 (函数): 内容`（`Logger::FormatData` 只取 basename，不打印完整路径）。
-- 板级适配点：`code_to_code()` 是各 `Board.cpp` 内的 `static inline` 多项式校准函数，按板型独立维护；Flash 中存在有效校准记录时，`CalibAdIdeal()` / `CalibDaRaw()` 以记录系数为准，否则回退到该函数。
+- 板级适配点：`CalibAdIdeal()` / `CalibDaRaw()` 以 Flash 校准记录系数为准；无有效记录（或该通道 `validMask` 未置位）时按原值直通（AD 侧 `ideal=raw`、DA 侧 `raw=ideal`），即不做换算。硬编码内建曲线已移除——它是单体级标定产物，换板不适用，新板一律经手动校准写入记录。
 
 ## Key Directories
 
@@ -215,11 +215,11 @@ cd host && nix develop --command npm run tauri dev
 - 唯一的质量门是构建成功 + 静态检查配置（`.clang-tidy` 已配置但未接入自动化流水线；`cppcheck` 无配置）。
 - 验证手段只能是硬件在环：`cmake --build build` → `just run <elf>` → 通过 USART4 日志（`LogInfo`/`LogTrace`）与 SWD 调试观察行为。改动驱动/标定/定时逻辑后，必须说明需要哪块板卡验证。
 - AD 标定实测（AD_4CH=DUT, DA_4CH=REF）：**残差与 AD/DA 通道对应关系直接相关**，实测证据如下。
-  - **实测对照**：4 个 AD 通道共接 1 个 DA 输出时 `ch1 resid max=28875 @58000 rmse=15436`、低段残差呈 `12500→28125` 线性递减（ch0 反而 `resid max=1.5 @37000 rmse=0.5`）；改为只接 1 路 AD 后 `resid max=1.5 / rmse=0.5`。非 ch0 通道的 ideal→raw 映射本来就只对 `kRefCh=0` 成立（无校准记录时 `CalibDaRaw` 对非 ch0 原值直通），共接时这些通道采到的不是自己被驱动的电压。
+  - **实测对照**：4 个 AD 通道共接 1 个 DA 输出时 `ch1 resid max=28875 @58000 rmse=15436`、低段残差呈 `12500→28125` 线性递减（ch0 反而 `resid max=1.5 @37000 rmse=0.5`）；改为只接 1 路 AD 后 `resid max=1.5 / rmse=0.5`。非 ch0 通道的 ideal→raw 映射本来就只对 ch0 成立（无校准记录时 `CalibDaRaw` 对非 ch0 原值直通），共接时这些通道采到的不是自己被驱动的电压。
   - **共接与此前诡异现象相符（未做排除性验证，仅为假设）**：四通道同号同步的 ~160 码跳变（DA 输出缓冲的负载瞬变同时作用于 4 路）、跳变位置逐次运行随机且扫描期与复检期不重合、`kSettleMs` 加大反而更差、`FILTER_NUM` 改小无改善。
-  - **正确接法**：标定时 DUT 每个 AD 通道必须各自接到 REF 的一个独立 DA 通道；只想验证单路时只接 `kRefCh` 对应的那一路。共接时非 `kRefCh` 通道的残差会大得离谱（实测 28875 码 ≈ 44% FS），`FitRun` 对首个超 `kResidualLimitCode` 的通道 `EnterFail()` 后直接返回，不落盘任何系数——这是设计行为，看到这种量级先查接线，不要调门限。
+  - **正确接法**：标定时 DUT 每个 AD 通道必须各自接到 REF 的一个独立 DA 通道；只想验证单路时只接 ch0 对应的那一路。共接时非 ch0 通道的残差会大得离谱（实测 28875 码 ≈ 44% FS），`FitRun` 对首个超 `kResidualLimitCode` 的通道 `EnterFail()` 后直接返回，不落盘任何系数——这是设计行为，看到这种量级先查接线，不要调门限。
   - **顺带修复的独立缺陷**：`AD7689Drv::m_filterData` 从未初始化，`GetAveragerVal` 对全部 32 槽求平均，上电后第一圈（128 ms）未填满时均值混入 RAM 残留。同一次运行 `pt0 ideal=0 raw=32`，而复检同一 `set=0` 的 `vfy0 raw=201`（两次 DA 都是 0）；把 pt0 从 32 改成 201 后离线重拟合，复检低段 d 从 `+41.4/+34.5/+29.3/+17.8`（ideal 0/1000/2000/5000）降到 `+3.3/+1.0/−0.3/−1.6`。修复：`Init()` 末尾跑 `FILTER_NUM*4` 次 `Sync()` 预热，槽填满后 `cnt1` 自然回绕到 0。
-  - **已用硬件数据排除的假设**：建压时间（`kSettleMs` 200→600 反而更差）；AD 盒式窗深度（`FILTER_NUM` 32→4 无改善）；通道轮转/`t_ACQ`（单通道连发绕过 4 ms 轮转无改善）；REF ACK 时序（ACK 在 `CalibDaSet()` 之后才发）；拟合方向与系数（离线逐位复算一致）；SPI 位/CFG 布局（对照 AD7689 手册 Table 13 逐位核对正确）；扫描/复检两段 `PH_SETTLE` 逐行对比一致；`s_stableCount`/`s_stableMin/Max` 初值一致；`s_rec.coeff` 与 `s_coeff` 同源（`DoSave` 只读不改）；`CalibLink` 环形缓冲与 CRC；`code_to_code()` 曲线（问题段斜率平滑单调）。
+  - **已用硬件数据排除的假设**：建压时间（`kSettleMs` 200→600 反而更差）；AD 盒式窗深度（`FILTER_NUM` 32→4 无改善）；通道轮转/`t_ACQ`（单通道连发绕过 4 ms 轮转无改善）；REF ACK 时序（ACK 在 `CalibDaSet()` 之后才发）；拟合方向与系数（离线逐位复算一致）；SPI 位/CFG 布局（对照 AD7689 手册 Table 13 逐位核对正确）；扫描/复检两段 `PH_SETTLE` 逐行对比一致；`s_stableCount`/`s_stableMin/Max` 初值一致；`s_rec.coeff` 与 `s_coeff` 同源（`DoSave` 只读不改）；`CalibLink` 环形缓冲与 CRC；内建校准曲线（已移除，问题段斜率平滑单调）。
   - **残差门限**：`kResidualLimitCode` 当前为 1000（仅保证落盘），`kCheckGateCode=16` 是复检门限。单路正确接法下实测 `resid max=1.5 / rmse=0.5`，远小于门限；若实测残差仍到几十~上百码，先查 AD/DA 通道是否一一对应，不要先调门限。
   - 定位工具已内置（编译开关，默认关闭，均在 `CMakeLists.txt` 定义为 cache 变量并经 `target_compile_definitions` 传入）：`-DCALIB_LOG_SPAN=1` 让 DUT 在扫描段每点（各通道 `calib: dpt… ch=` 行之后）追加 `calib: span%u min=… max=…`（四通道各自的窗内 min/max，用于判断「电平在窗内是否稳定」；复检段的 `vspan` 已随并行化移除）；`-DCALIB_FIXED_IDEAL=<code>` 把 67 点全钉在该 ideal 上驻留（分离「施加不稳」与「采集不稳」）；`-DCALIB_SETTLE_MS=<ms>` 覆盖 `kSettleMs`；`-DCALIB_FIRST_SETTLE_MS=<ms>` 覆盖 `kFirstSettleMs`（首点建压等待，默认 600 ms——扫描/复检起点 DA 大跳变，`kSettleMs` 不足会使低端 0 点锚点测偏 ~30 码；标定与复检两侧共用此常量）；`-DAD_FILTER_NUM=<n>` 覆盖 `AD7689Drv::FILTER_NUM`（盒式窗深度）；`-DAD_BURST_SAMPLE=1` 让 `Sync()` 改走 `ReadOneChannelData()`（每通道连发 3 帧、间隔 1 ms，绕过 4 ms 轮转）。REF 侧 `OP_SET_DA` 恒打印 `calib: set_da ch= mode= in= raw=`（REF 实际写给 MS5542 的码；`mode=0` 表示 `in` 即 raw 直写，`mode=1` 表示已按 ideal 查系数）。
 - DA 方向（DA 板 DUT + AD 板 REF）实测：REF 经 `OP_READ_AD` 回传的 ideal 是 **AD 板标定后**的理想码，其域可略超 65535（实测满量程 `calib: refad ch=0 ideal=65930.2`，即 AD 标定曲线在全码段斜率 ≈1.0057）。故 DUT 侧 `calib: dpt… meas=` / `calib: dvfy… meas=` 以 `%.1f` 打印（有符号浮点，可达 ~66000、也可为负——早先用 `(unsigned)` 截断会把负值打成 0，掩盖首点差异），`dump chN` 仍按无符号整数打印（可达 ~66000），上位机 `samples` 以 f64 解析，勿强制 u16（u16 溢出会静默变 0，令「前误差」假报 65535）。DA 方向复检 `verify ch%d max/rmse` 与扫描残差同量级（实测 ~14 码），远小于门限。DA 方向每点采样 = 等 `kSettleMs`(200 ms) 建压后，**按 `kRefSampleIntervalMs`(20 ms) 间隔**连读 16 次 REF `OP_READ_AD`（窗长 320 ms），窗内取**中值**（非 mid(min,max)）。两点不可省：(1) REF 的 AD 值是 32 槽均值滤波输出、每 4 ms 刷新一次，采样必须跨过滤波长度；(2) 单个坏 ADC 样本进入该滤波后会把输出整体抬升 ≈5000/32≈156 码并持续 128 ms，只要窗长 > 128 ms，被污染样本即为少数，中值可完全剔除——实测复检随机 ~150~260 码超差（`vfy chN |d|>=16 at: 62000(148)` 之类，每轮随机通道/点位）即源于此；窗内极差 > `kStableCode`(20) 时该点 `dpt`/`dvfy` 行追加 `unstable`。

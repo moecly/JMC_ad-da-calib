@@ -84,9 +84,6 @@ constexpr uint32_t kPingIntervalMs = 100;
 constexpr int kPingMax = 20;
 constexpr double kResidualLimitCode = 1000.0;
 constexpr double kCheckGateCode = 16.0;
-// 参考端可信通道：硬件与标定实测均为 ch0，内建曲线 code_to_code() 只对 ch0 成立，
-// 无校准记录时非 ch0 通道不做换算（原值直通）
-constexpr uint8_t kRefCh = 0;
 
 CalibRecord s_rec;
 
@@ -1598,22 +1595,6 @@ void FitAll() {
             EnterFail();
             return;
         }
-
-        // anchor dev：诊断该 ch 拟合曲线与本机内建曲线的偏差
-        double dev = 0.0;
-        for (int i = 0; i < kGridN; i++) {
-#if defined(CONFIG_DEVICE_AD_4CH)
-            double builtin = Bd().CalibBuiltinIdealFromRaw((uint16_t)xs[i]);
-#else
-            double builtin = Bd().CalibBuiltinRawFromIdeal((uint16_t)xs[i]);
-#endif
-            double d = PolyEval(s_coeff[ch], xs[i]) - builtin;
-            if (d < 0) d = -d;
-            if (d > dev) dev = d;
-        }
-        char devMsg[48];
-        snprintf(devMsg, sizeof(devMsg), "calib: ch%u anchor dev = %g", (unsigned)ch, dev);
-        LogInfo << devMsg;
     }
 
     s_dumpLine = 0;

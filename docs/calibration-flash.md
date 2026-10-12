@@ -46,9 +46,10 @@
 
 - AD 侧 `CalibAdIdeal()` 直接返回 `PolyEval()` 结果（`float`），**不钳位、不取整**。
 - DA 侧 `CalibDaRaw()` 返回 `uint16_t`：结果先钳位到 `[0,65535]`，再 `+0.5` 截断取整。
-- 记录任一字段校验失败（`magic` / `version` / `board` / `degree` / `channelCount` / `validMask` / `crc32`）时，回退到各 `Board.cpp` 内硬编码的 `code_to_code()`，行为与无校准记录一致。
-- `version` 必须为 `2`：v1 记录（偏移 16 原为 4 字节 `reserved`）会被 Load 拒绝，从而回退内建曲线。
-- 运行时按 `validMask` 逐通道回退：仅当 `degree` 匹配且 `validMask` 对应 bit 置位时才用该通道系数换算，否则该通道走 `code_to_code()`（ch0）或原值直通（非 ch0）。因此单通道校准只写回被标定通道的 bit，其余通道系数保持原值但不再被使用。
+- 记录任一字段校验失败（`magic` / `version` / `board` / `degree` / `channelCount` / `validMask` / `crc32`）时，行为与无校准记录一致：按原值直通。
+- `version` 必须为 `2`：v1 记录（偏移 16 原为 4 字节 `reserved`）会被 Load 拒绝，从而按无记录处理（原值直通）。
+- 运行时按 `validMask` 逐通道回退：仅当 `degree` 匹配且 `validMask` 对应 bit 置位时才用该通道系数换算，否则该通道原值直通（AD 侧 `ideal=raw`、DA 侧 `raw=ideal`）。因此单通道校准只写回被标定通道的 bit，其余通道系数保持原值但不再被使用。
+- 不再存在硬编码内建曲线：校准系数一律来自 Flash 记录，新板须先经手动校准写入。
 
 拟合残差门限：`kResidualLimitCode = 1000.0` 码（`CalibProc.cpp`），超限则本次校准失败、不写 Flash。当前 1000 只是为放开落盘而放宽的值——实测残差 130~170 码属施加端/公共端的物理层漂移，不是拟合或量化误差：同一 ideal 下扫描期与复检期 raw 相差恒定 ~160 码（≈2400 ppm）、符号随机、成对反号且配对跨数千码，与建压时间（200/600 ms）、盒式窗深度（32/4）、通道轮转（4 ms/单通道连发）均无关；把 ideal 钉死在单点（DA 只写一次）时残差降至 ~43。低段 `pt0..6` 仅 1 码，证明 SPI 帧、通道映射、盒式均值、Horner 求值全部正确。详见 `AGENTS.md` 的 Testing & QA。
 
