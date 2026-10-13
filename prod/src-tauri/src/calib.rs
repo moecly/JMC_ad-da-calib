@@ -1125,6 +1125,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_status_reply() {
+        // DUT 的 OP_HOST_STATUS 应答：重连不复位 MCU 时靠这些行补齐概览卡
+        let mut parser = Parser::new();
+        let lines = [
+            "HostPoll|Device: AD_4CH, App Version: v1.9",
+            "User|calib: role DUT",
+            "HostPoll|calib: board ad",
+            "HostPoll|calib: loaded",
+            "HostPoll|calib: state idle",
+            "HostPoll|calib: mask 0xF",
+            "HostPoll|calib: coeff ch0 30.05415 0.995169 0 0",
+        ];
+        for l in lines {
+            let (source, msg) = l.split_once('|').unwrap();
+            let line = crate::rtt::parse_line(&format!("[INFO] CalibProc.cpp:1 ({source}): {msg}"));
+            assert!(parser.feed(&line.message), "{l}");
+        }
+        assert_eq!(parser.report.device.as_deref(), Some("AD_4CH"));
+        assert_eq!(parser.report.app_version.as_deref(), Some("v1.9"));
+        assert_eq!(parser.report.board_dir.as_deref(), Some("ad"));
+        assert!(parser.report.record_loaded);
+        assert_eq!(parser.report.role.as_deref(), Some("DUT"));
+        assert_eq!(parser.report.phase, "idle");
+        assert_eq!(parser.report.valid_mask, 0xF);
+        assert!(parser.report.channels[0].valid);
+        assert!(parser.report.channels[0].coeff.is_some());
+    }
+
+    #[test]
     fn parses_fw_params() {
         let mut parser = Parser::new();
         assert!(parser.feed(

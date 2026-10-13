@@ -23,8 +23,6 @@ use rtt::{LogLine, ProbeInfo, Status};
 pub struct AppState {
     pipeline: Mutex<Option<(std::thread::JoinHandle<()>, Arc<AtomicBool>)>>,
     shared: Arc<PipelineShared>,
-    conn_status: Arc<Mutex<Status>>,
-    probe_name: Mutex<Option<String>>,
     lines: Arc<Mutex<VecDeque<LogLine>>>,
 }
 
@@ -48,7 +46,7 @@ async fn connect(app: AppHandle, state: State<'_, AppState>, probe_index: usize,
     let (name, message) = tauri::async_runtime::spawn_blocking(move || probe_selfcheck(probe_index, &chip))
         .await
         .map_err(|e| format!("连接任务失败: {e}"))??;
-    *state.probe_name.lock() = Some(name);
+    *state.shared.probe_name.lock() = Some(name);
     let status = Status {
         connected: true,
         state: "attached".to_string(),
@@ -56,7 +54,7 @@ async fn connect(app: AppHandle, state: State<'_, AppState>, probe_index: usize,
         hint: None,
         attempts: 0,
     };
-    rtt::emit_status(&app, &state.conn_status, status);
+    rtt::emit_status(&app, &state.shared.conn_status, status);
     Ok(())
 }
 
@@ -131,10 +129,10 @@ async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
             }
         }
     }
-    *state.probe_name.lock() = None;
+    *state.shared.probe_name.lock() = None;
     rtt::emit_status(
         &app,
-        &state.conn_status,
+        &state.shared.conn_status,
         Status {
             connected: false,
             state: "disconnected".to_string(),
@@ -149,8 +147,8 @@ async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
 #[tauri::command]
 fn get_snapshot(state: State<AppState>) -> Snapshot {
     Snapshot {
-        status: state.conn_status.lock().clone(),
-        probe_name: state.probe_name.lock().clone(),
+        status: state.shared.conn_status.lock().clone(),
+        probe_name: state.shared.probe_name.lock().clone(),
         lines: state.lines.lock().iter().cloned().collect(),
         report: state.shared.status.lock().report.clone(),
     }

@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter};
 use crate::calib::{CalibReport, Parser};
 use crate::flash;
 use crate::proto::{self, CalibParams};
-use crate::rtt::{parse_line, LogLine};
+use crate::rtt::{parse_line, LogLine, Status};
 
 pub const CALIB_TIMEOUT_SECS: u64 = 600;
 pub const VERIFY_LOG_LINES: usize = 80;
@@ -60,15 +60,78 @@ impl Default for PipelineStatus {
 #[derive(Default)]
 pub struct PipelineShared {
     pub status: Mutex<PipelineStatus>,
+    // 连接状态由流程线程在结束时归零（探针随 session drop 归还），避免 UI 常驻「已连接」
+    pub conn_status: Arc<Mutex<Status>>,
+    pub probe_name: Mutex<Option<String>>,
 }
 
-/// 启动校验日志是否通过：固件上电打印 `Device: <板型>, App Version: vX.Y` 与 `Init success`。
-/// 两个信号都必须出现。
-pub fn verify_log_pass(lines: &[String]) -> bool {
+impl PipelineShared {
+    /// 流程结束（PASS/FAIL/中止）即把连接状态归零：探针已随 session drop 归还，
+    /// 若继续显示「已连接」，操作员会以为探针仍被占用。下一台板重新点「连接」自检。
+    pub fn mark_disconnected(&self) -> Status {
+        *self.probe_name.lock() = None;
+        let status = Status {
+            connected: false,
+            state: "disconnected".to_string(),
+            message: "流程结束，已断开探针".to_string(),
+            hint: None,
+            attempts: 0,
+        };
+        *self.conn_status.lock() = status.clone();
+        status
+    }
+}
+
+/// APP 启动校验是否通过：固件上电打印 `Device: <板型>, App Version: vX.Y`、`Init success`，
+/// 以及本板标定记录加载标记（见 `calib_load_ok`）。三个信号都必须出现。
+pub fn verify_log_pass(lines: &[String], board_dir: Option<&str>) -> bool {
     let has_device =
         lines.iter().any(|l| l.contains("Device:") && l.contains("App Version:"));
     let has_init = lines.iter().any(|l| l.contains("Init success"));
-    has_device && has_init
+    has_device && has_init && calib_load_ok(lines, board_dir)
+}
+
+/// 标定记录加载成功标记：APP 在 `BoardInit()` 主动触发一次换算，打印
+/// `calib ad load ok mask=15` / `calib da load ok mask=15`（失败为 `calib <board> load fail (raw passthrough)`）。
+/// 烧 APP 走 keep_unwritten_bytes（保护 `0x0800F000`），该标记证明记录仍完好且被 APP 读出；
+/// mask 必须非 0——加载成功但无有效通道等于没应用任何系数，不能放行。
+pub fn calib_load_ok(lines: &[String], board_dir: Option<&str>) -> bool {
+    let markers: &[&str] = match board_dir {
+        Some("ad") => &["calib ad load ok mask="],
+        Some("da") => &["calib da load ok mask="],
+        // 校准阶段未报板型时放宽为任一板型标记
+        _ => &["calib ad load ok mask=", "calib da load ok mask="],
+    };
+    lines.iter().any(|l| {
+        markers.iter().any(|m| match l.find(m) {
+            Some(i) => mask_value(&l[i + m.len()..]) != 0,
+            None => false,
+        })
+    })
+}
+
+/// 兼容十进制/十六进制两种打印形式：只看是否非 0，任一表示法下判据一致。
+fn mask_value(rest: &str) -> u32 {
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    u32::from_str_radix(&digits, 16).unwrap_or(0)
+}
+
+fn verify_missing(lines: &[String], board_dir: Option<&str>) -> String {
+    let mut missing: Vec<&str> = Vec::new();
+    if !lines.iter().any(|l| l.contains("Device:") && l.contains("App Version:")) {
+        missing.push("Device/App Version");
+    }
+    if !lines.iter().any(|l| l.contains("Init success")) {
+        missing.push("Init success");
+    }
+    if !calib_load_ok(lines, board_dir) {
+        missing.push(match board_dir {
+            Some("ad") => "calib ad load ok mask≠0",
+            Some("da") => "calib da load ok mask≠0",
+            _ => "calib ad|da load ok mask≠0",
+        });
+    }
+    missing.join(" / ")
 }
 
 /// 校准是否通过：复检被跳过（以拟合残差门限放行）时以落盘结论为准，
@@ -252,6 +315,7 @@ fn run_verify_log(
     stop: &Arc<AtomicBool>,
     core: &mut probe_rs::Core<'_>,
     mut rtt: Rtt,
+    board_dir: Option<&str>,
 ) -> Result<(), String> {
     let mut buf = [0u8; 1024];
     let mut pending: Vec<u8> = Vec::new();
@@ -287,14 +351,14 @@ fn run_verify_log(
         if pending.len() > 4096 {
             pending.clear();
         }
-        if lines.len() >= VERIFY_LOG_LINES || verify_log_pass(&lines) {
+        if lines.len() >= VERIFY_LOG_LINES || verify_log_pass(&lines, board_dir) {
             break;
         }
     }
-    if verify_log_pass(&lines) {
+    if verify_log_pass(&lines, board_dir) {
         Ok(())
     } else {
-        Err("APP 启动验证失败：未同时出现 Device/App Version 与 Init success".to_string())
+        Err(format!("APP 启动验证失败：缺少 {}", verify_missing(&lines, board_dir)))
     }
 }
 
@@ -306,8 +370,24 @@ impl Drop for ActiveGuard {
     }
 }
 
+struct ConnGuard {
+    app: AppHandle,
+    shared: Arc<PipelineShared>,
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        let status = self.shared.mark_disconnected();
+        let _ = self.app.emit("rtt://status", status);
+    }
+}
+
 fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, shared: Arc<PipelineShared>) {
     let _active = ActiveGuard(shared.clone());
+    let _conn = ConnGuard {
+        app: app.clone(),
+        shared: shared.clone(),
+    };
     shared.status.lock().running = true;
     {
         if stop.load(Ordering::Relaxed) {
@@ -413,7 +493,8 @@ fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, sha
                     return;
                 }
             };
-            match run_verify_log(&app, &shared, &stop, &mut core, rtt) {
+            let board_dir = shared.status.lock().report.board_dir.clone();
+            match run_verify_log(&app, &shared, &stop, &mut core, rtt, board_dir.as_deref()) {
                 Ok(()) => set_status(&shared, "done", Some(true), "启动验证通过，流程完成 PASS"),
                 Err(e) => {
                     set_status(&shared, "done", Some(false), e);
@@ -470,33 +551,108 @@ mod tests {
     }
 
     #[test]
+    fn mark_disconnected_clears_conn_state() {
+        let shared = PipelineShared::default();
+        *shared.probe_name.lock() = Some("Probe A".to_string());
+        *shared.conn_status.lock() = Status {
+            connected: true,
+            state: "connected".to_string(),
+            message: "已连接".to_string(),
+            hint: None,
+            attempts: 0,
+        };
+        let s = shared.mark_disconnected();
+        assert!(!s.connected);
+        assert_eq!(s.state, "disconnected");
+        assert!(!shared.conn_status.lock().connected);
+        assert!(shared.probe_name.lock().is_none());
+    }
+
+    #[test]
     fn verify_log_pass_both_signals() {
         let lines = vec![
             "[INFO] Application.cpp:87 (VersionPrint): Device: AD_4CH, App Version: v1.9".to_string(),
+            "[INFO] Board.cpp:24 (BoardInit): calib ad load ok mask=15".to_string(),
             "[INFO] Application.cpp:54 (Init): Init success".to_string(),
         ];
-        assert!(verify_log_pass(&lines));
+        assert!(verify_log_pass(&lines, Some("ad")));
     }
 
     #[test]
     fn verify_log_pass_missing_device() {
-        let lines = vec!["[INFO] Application.cpp:54 (Init): Init success".to_string()];
-        assert!(!verify_log_pass(&lines));
+        let lines = vec![
+            "[INFO] Board.cpp:24 (BoardInit): calib ad load ok mask=15".to_string(),
+            "[INFO] Application.cpp:54 (Init): Init success".to_string(),
+        ];
+        assert!(!verify_log_pass(&lines, Some("ad")));
     }
 
     #[test]
     fn verify_log_pass_missing_init() {
-        let lines = vec!["[INFO] Application.cpp:87 (VersionPrint): Device: AD_4CH, App Version: v1.9".to_string()];
-        assert!(!verify_log_pass(&lines));
+        let lines = vec![
+            "[INFO] Application.cpp:87 (VersionPrint): Device: AD_4CH, App Version: v1.9".to_string(),
+            "[INFO] Board.cpp:24 (BoardInit): calib ad load ok mask=15".to_string(),
+        ];
+        assert!(!verify_log_pass(&lines, Some("ad")));
     }
 
     #[test]
     fn verify_log_pass_requires_init_after_device() {
-        // 顺序无关，只要两条都出现过即通过
+        // 顺序无关，只要三条都出现过即通过
         let lines = vec![
             "[INFO] Application.cpp:54 (Init): Init success".to_string(),
             "[INFO] Application.cpp:87 (VersionPrint): Device: DA_4CH, App Version: v1.9".to_string(),
+            "[INFO] Board.cpp:19 (BoardInit): calib da load ok mask=15".to_string(),
         ];
-        assert!(verify_log_pass(&lines));
+        assert!(verify_log_pass(&lines, Some("da")));
+    }
+
+    #[test]
+    fn verify_log_pass_requires_calib_load_ok() {
+        // 缺标定记录加载标记：APP 未应用系数（或烧录后记录被破坏）
+        let lines = vec![
+            "[INFO] Application.cpp:87 (VersionPrint): Device: AD_4CH, App Version: v1.9".to_string(),
+            "[INFO] Application.cpp:54 (Init): Init success".to_string(),
+        ];
+        assert!(!verify_log_pass(&lines, Some("ad")));
+        assert_eq!(verify_missing(&lines, Some("ad")), "calib ad load ok mask≠0");
+    }
+
+    #[test]
+    fn verify_log_pass_rejects_zero_mask() {
+        // 记录 CRC 通过但无有效通道：等于没应用系数，不能放行
+        let lines = vec![
+            "[INFO] Application.cpp:87 (VersionPrint): Device: AD_4CH, App Version: v1.9".to_string(),
+            "[INFO] Board.cpp:55 (BoardInit): calib ad load ok mask=0".to_string(),
+            "[INFO] Application.cpp:54 (Init): Init success".to_string(),
+        ];
+        assert!(!verify_log_pass(&lines, Some("ad")));
+    }
+
+    #[test]
+    fn verify_log_pass_rejects_wrong_board_marker() {
+        // 板型匹配：AD 板只认 `calib ad load ok`，加载失败标记不算通过
+        let da_marker = vec![
+            "[INFO] Application.cpp:87 (VersionPrint): Device: AD_4CH, App Version: v1.9".to_string(),
+            "[INFO] Board.cpp:46 (BoardInit): calib da load ok mask=15".to_string(),
+            "[INFO] Application.cpp:54 (Init): Init success".to_string(),
+        ];
+        assert!(!verify_log_pass(&da_marker, Some("ad")));
+        let fail_marker = vec![
+            "[INFO] Application.cpp:87 (VersionPrint): Device: AD_4CH, App Version: v1.9".to_string(),
+            "[INFO] Board.cpp:46 (BoardInit): calib ad load fail (raw passthrough)0".to_string(),
+            "[INFO] Application.cpp:54 (Init): Init success".to_string(),
+        ];
+        assert!(!verify_log_pass(&fail_marker, Some("ad")));
+    }
+
+    #[test]
+    fn verify_log_pass_accepts_any_board_marker_when_unknown() {
+        let lines = vec![
+            "[INFO] Application.cpp:87 (VersionPrint): Device: DA_4CH, App Version: v1.9".to_string(),
+            "[INFO] Board.cpp:44 (BoardInit): calib da load ok mask=15".to_string(),
+            "[INFO] Application.cpp:54 (Init): Init success".to_string(),
+        ];
+        assert!(verify_log_pass(&lines, None));
     }
 }

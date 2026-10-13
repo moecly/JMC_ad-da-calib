@@ -53,7 +53,8 @@ export function ConnectionBar({
     <header className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-4 py-2">
       <StatusDot state={status.state} />
       <span className="text-[13px] font-medium">{status.message || (connected ? "已连接" : "未连接")}</span>
-      {probeName && <span className="text-xs text-ink-faint">{probeName}</span>}
+      {/* 流程结束会自动置为未连接，此时 snapshot 里的探针名尚未刷新，别显示残留名字 */}
+      {connected && probeName && <span className="text-xs text-ink-faint">{probeName}</span>}
 
       <div className="ml-auto flex flex-wrap items-center gap-2">
         <Select

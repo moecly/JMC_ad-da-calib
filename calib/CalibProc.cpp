@@ -615,6 +615,7 @@ void HandleManual(const uint8_t* p, uint8_t len) {
             LogInfo << "calib: board " << kBoardDir;
             snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
             LogInfo << m;
+            if (s_rec.validMask != 0) LogInfo << "calib: loaded";
             break;
         case OP_HOST_PARAMS:
             if (s_sampling) {
@@ -972,7 +973,11 @@ void HandleHost(const uint8_t* p, uint8_t len) {
             break;
         }
         case OP_HOST_STATUS:
+            // 上电日志只在复位后出现一次，重连（不复位 MCU）时靠本应答补齐概览卡字段
+            PrintDevice();
             LogInfo << "calib: role DUT";
+            LogInfo << "calib: board " << kBoardDir;
+            if (s_rec.validMask != 0) LogInfo << "calib: loaded";
             PrintState();
             snprintf(m, sizeof(m), "calib: cfg mask=0x%X da=%u,%u,%u,%u", (unsigned)s_chMask, (unsigned)s_refDa[0],
                      (unsigned)s_refDa[1], (unsigned)s_refDa[2], (unsigned)s_refDa[3]);
