@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { PipelineConfig, PipelineStatus, ProbeInfo } from "../types";
 import * as api from "../lib/ipc";
@@ -35,17 +35,23 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
   const [probeIndex, setProbeIndex] = useState(0);
   const [chip, setChip] = useState("AT32F425K8T7");
   const [boardIdx, setBoardIdx] = useState(0);
-  const [dutPath, setDutPath] = useState("");
-  const [appPath, setAppPath] = useState("");
+  const [dutPath, setDutPath] = useState(() => localStorage.getItem("prod.dutPath") ?? "");
+  const [appPath, setAppPath] = useState(() => localStorage.getItem("prod.appPath") ?? "");
   const [chMask, setChMask] = useState(0x0f);
   const [refDa, setRefDa] = useState<string[]>(["0", "1", "2", "3"]);
   const [sn, setSn] = useState("");
   const [autoNext, setAutoNext] = useState(true);
-  const [resultsDir, setResultsDir] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const running = pipeline !== null && pipeline.step !== "idle" && pipeline.step !== "wait_next" && pipeline.step !== "done";
+  useEffect(() => {
+    localStorage.setItem("prod.dutPath", dutPath);
+  }, [dutPath]);
+  useEffect(() => {
+    localStorage.setItem("prod.appPath", appPath);
+  }, [appPath]);
+
+  const running = pipeline?.running ?? false;
   const disabled = busy || running;
 
   const pickFile = async (setter: (v: string) => void) => {
@@ -59,14 +65,9 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
     if (typeof picked === "string") setter(picked);
   };
 
-  const pickDir = async () => {
-    const picked = await open({ directory: true, multiple: false });
-    if (typeof picked === "string") setResultsDir(picked);
-  };
-
   const start = async () => {
-    if (!dutPath || !appPath || !resultsDir) {
-      setError("请选择校准固件、应用固件与结果目录");
+    if (!dutPath || !appPath) {
+      setError("请选择校准固件与应用固件");
       return;
     }
     setBusy(true);
@@ -81,7 +82,6 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
       ref_da: refDa.map((s) => Number(s)),
       sn: sn.trim() || null,
       auto_next: autoNext,
-      results_dir: resultsDir,
     };
     try {
       await api.startPipeline(cfg);
@@ -200,20 +200,6 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
                   onChange={(e) => setRefDa((a) => a.map((v, j) => (j === i ? e.currentTarget.value : v)))}
                 />
               ))}
-            </div>
-          </Field>
-          <Field label="结果目录">
-            <div className="flex gap-2">
-              <Input
-                className="flex-1"
-                value={resultsDir}
-                disabled={disabled}
-                placeholder="选择结果 JSON 输出目录"
-                onChange={(e) => setResultsDir(e.currentTarget.value)}
-              />
-              <Button size="sm" disabled={disabled} onClick={() => void pickDir()}>
-                浏览
-              </Button>
             </div>
           </Field>
           <Field label="连续多台">

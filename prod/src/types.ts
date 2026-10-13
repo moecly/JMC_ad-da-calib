@@ -113,7 +113,6 @@ export interface PipelineConfig {
   ref_da: number[];
   sn: string | null;
   auto_next: boolean;
-  results_dir: string;
 }
 
 export interface PipelineStatus {
@@ -122,4 +121,5 @@ export interface PipelineStatus {
   message: string;
   log_lines: LogLine[];
   report: CalibReport;
+  running: boolean;
 }

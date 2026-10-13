@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use parking_lot::{Condvar, Mutex};
 use probe_rs::probe::list::Lister;
 use probe_rs::rtt::{Rtt, ScanRegion};
-use probe_rs::{CoreStatus, Permissions};
+use probe_rs::Permissions;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
@@ -33,7 +33,6 @@ pub struct PipelineConfig {
     pub ref_da: [u8; 4],
     pub sn: Option<String>,
     pub auto_next: bool,
-    pub results_dir: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -43,6 +42,7 @@ pub struct PipelineStatus {
     pub message: String,
     pub log_lines: Vec<LogLine>,
     pub report: CalibReport,
+    pub running: bool,
 }
 
 impl Default for PipelineStatus {
@@ -53,6 +53,7 @@ impl Default for PipelineStatus {
             message: String::new(),
             log_lines: Vec::new(),
             report: CalibReport::default(),
+            running: false,
         }
     }
 }
@@ -77,10 +78,6 @@ pub fn calib_pass(report: &CalibReport) -> Option<bool> {
     report.verify_pass
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-}
-
 pub fn spawn_pipeline(
     app: AppHandle,
     cfg: PipelineConfig,
@@ -88,6 +85,22 @@ pub fn spawn_pipeline(
     shared: Arc<PipelineShared>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || pipeline_loop(app, cfg, stop, shared))
+}
+
+/// 推送流程状态。payload 不带 log_lines：日志已由 `prod://line` 事件单独推送，
+/// 若把 log_lines（可累积到 MAX_LINES 数千行）一并克隆/序列化，主线程会被拖住导致 UI 卡死。
+pub fn emit_status(app: &AppHandle, shared: &PipelineShared) {
+    let s = shared.status.lock();
+    let ev = PipelineStatus {
+        step: s.step.clone(),
+        ok: s.ok,
+        message: s.message.clone(),
+        log_lines: Vec::new(),
+        report: s.report.clone(),
+        running: s.running,
+    };
+    drop(s);
+    let _ = app.emit("prod://status", ev);
 }
 
 fn set_status(shared: &PipelineShared, step: &str, ok: Option<bool>, message: impl Into<String>) {
@@ -152,7 +165,7 @@ fn attach_rtt(
                     let _ = core.run(); // reset 为 halt 语义，须 run 恢复，否则固件永不初始化 RTT
                 }
                 set_status(shared, "attach", None, format!("未找到 RTT 控制块（第 {tries} 次）: {e}"));
-                let _ = app.emit("prod://status", shared.status.lock().clone());
+                emit_status(&app, &shared);
                 sleep(Duration::from_millis(500));
                 if tries >= ATTACH_MAX_TRIES {
                     return Err(format!("未找到 RTT 控制块: {e}"));
@@ -282,65 +295,43 @@ fn run_verify_log(
     }
 }
 
-fn write_result(shared: &PipelineShared, cfg: &PipelineConfig, report: &CalibReport, ok: bool, step: &str) {
-    let board = cfg.board.clone();
-    let app_version = report.app_version.clone().unwrap_or_default();
-    let sn = cfg.sn.clone().unwrap_or_else(|| "UNKNOWN".to_string());
-    let selected: Vec<&crate::calib::ChannelReport> = report
-        .channels
-        .iter()
-        .filter(|c| (cfg.ch_mask >> c.ch) & 1 != 0 && c.verify.is_some())
-        .collect();
-    let verify_max = selected.iter().map(|c| c.verify.as_ref().unwrap().max).fold(f64::NEG_INFINITY, f64::max);
-    let verify_rmse = selected.iter().map(|c| c.verify.as_ref().unwrap().rmse).fold(f64::NEG_INFINITY, f64::max);
-    let verify_max = if selected.is_empty() { f64::NAN } else { verify_max };
-    let verify_rmse = if selected.is_empty() { f64::NAN } else { verify_rmse };
+struct ActiveGuard(Arc<PipelineShared>);
 
-    let ts = now_ms();
-    let name = format!("{sn}-{board}-{ts}.json");
-    let path = cfg.results_dir.join(name);
-    if let Err(e) = std::fs::create_dir_all(&cfg.results_dir) {
-        set_status(shared, step, Some(ok), format!("创建结果目录失败: {e}"));
-        return;
-    }
-    let rec = serde_json::json!({
-        "sn": cfg.sn,
-        "board": board,
-        "app_version": app_version,
-        "dut_path": cfg.dut_path.display().to_string(),
-        "app_path": cfg.app_path.display().to_string(),
-        "verify_pass": report.verify_pass,
-        "verify_max": verify_max,
-        "verify_rmse": verify_rmse,
-        "started_at": ts,
-        "finished_at": now_ms(),
-        "step": step,
-        "ok": ok,
-    });
-    match std::fs::write(&path, serde_json::to_string_pretty(&rec).unwrap_or_default()) {
-        Ok(()) => set_status(shared, step, Some(ok), format!("结果已写入 {}", path.display())),
-        Err(e) => set_status(shared, step, Some(ok), format!("写结果文件失败: {e}")),
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.status.lock().running = false;
     }
 }
 
 fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, shared: Arc<PipelineShared>) {
+    let _active = ActiveGuard(shared.clone());
+    shared.status.lock().running = true;
     loop {
+        if stop.load(Ordering::Relaxed) {
+            set_status(&shared, "idle", None, "已停止");
+            emit_status(&app, &shared);
+            return;
+        }
         let mut session = match open_session(&cfg) {
             Ok(s) => s,
             Err(e) => {
                 set_status(&shared, "flash_dut", Some(false), format!("打开会话失败: {e}"));
-                let _ = app.emit("prod://status", shared.status.lock().clone());
+                emit_status(&app, &shared);
                 return;
             }
         };
 
         // Step: FlashDut
-        set_status(&shared, "flash_dut", None, format!("烧录校准固件 {}", cfg.dut_path.display()));
+        if stop.load(Ordering::Relaxed) {
+            set_status(&shared, "idle", None, "已停止");
+            emit_status(&app, &shared);
+            return;
+        }
+        set_status(&shared, "flash_dut", None, format!("烧录校准固件（约数十秒，请稍候）{}", cfg.dut_path.display()));
         let _ = app.emit("prod://status", shared.status.lock().clone());
         if let Err(e) = flash::flash_file(&mut session, &cfg.dut_path) {
             set_status(&shared, "flash_dut", Some(false), e);
-            let _ = app.emit("prod://status", shared.status.lock().clone());
-            write_result(&shared, &cfg, &shared.status.lock().report, false, "flash_dut");
+            emit_status(&app, &shared);
             return;
         }
 
@@ -350,52 +341,52 @@ fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, sha
                 Ok(c) => c,
                 Err(e) => {
                     set_status(&shared, "attach_calib", Some(false), format!("选择核心失败: {e}"));
-                    let _ = app.emit("prod://status", shared.status.lock().clone());
-                    write_result(&shared, &cfg, &shared.status.lock().report, false, "attach_calib");
+                    emit_status(&app, &shared);
                     return;
                 }
             };
             set_status(&shared, "attach_calib", None, "正在附着校准固件 RTT…");
-            let _ = app.emit("prod://status", shared.status.lock().clone());
+            emit_status(&app, &shared);
             let rtt = match attach_rtt(&app, &shared, &stop, &mut core) {
                 Ok(r) => r,
                 Err(e) => {
                     set_status(&shared, "attach_calib", Some(false), e);
-                    let _ = app.emit("prod://status", shared.status.lock().clone());
-                    write_result(&shared, &cfg, &shared.status.lock().report, false, "attach_calib");
+                    emit_status(&app, &shared);
                     return;
                 }
             };
             set_status(&shared, "run_calib", None, "开始校准（67 点并行扫描 → 拟合 → 落盘 → 复检）…");
-            let _ = app.emit("prod://status", shared.status.lock().clone());
+            emit_status(&app, &shared);
             match run_calib(&app, &shared, &stop, &mut core, rtt, &cfg) {
                 Ok(true) => {
                     set_status(&shared, "run_calib", Some(true), "校准 PASS");
                 }
                 Ok(false) => {
                     set_status(&shared, "run_calib", Some(false), "校准 FAIL");
-                    let _ = app.emit("prod://status", shared.status.lock().clone());
-                    write_result(&shared, &cfg, &shared.status.lock().report, false, "run_calib");
+                    emit_status(&app, &shared);
                     return;
                 }
                 Err(e) => {
                     set_status(&shared, "run_calib", Some(false), e);
-                    let _ = app.emit("prod://status", shared.status.lock().clone());
-                    write_result(&shared, &cfg, &shared.status.lock().report, false, "run_calib");
+                    emit_status(&app, &shared);
                     return;
                 }
             }
-            let _ = app.emit("prod://status", shared.status.lock().clone());
+            emit_status(&app, &shared);
         }
         // core/rtt 已 drop，session 重新可变
 
         // Step: FlashApp
-        set_status(&shared, "flash_app", None, format!("烧录应用固件 {}", cfg.app_path.display()));
+        if stop.load(Ordering::Relaxed) {
+            set_status(&shared, "idle", None, "已停止");
+            emit_status(&app, &shared);
+            return;
+        }
+        set_status(&shared, "flash_app", None, format!("烧录应用固件（约数十秒，请稍候）{}", cfg.app_path.display()));
         let _ = app.emit("prod://status", shared.status.lock().clone());
         if let Err(e) = flash::flash_file(&mut session, &cfg.app_path) {
             set_status(&shared, "flash_app", Some(false), e);
-            let _ = app.emit("prod://status", shared.status.lock().clone());
-            write_result(&shared, &cfg, &shared.status.lock().report, false, "flash_app");
+            emit_status(&app, &shared);
             return;
         }
 
@@ -405,19 +396,17 @@ fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, sha
                 Ok(c) => c,
                 Err(e) => {
                     set_status(&shared, "attach_verify", Some(false), format!("选择核心失败: {e}"));
-                    let _ = app.emit("prod://status", shared.status.lock().clone());
-                    write_result(&shared, &cfg, &shared.status.lock().report, false, "attach_verify");
+                    emit_status(&app, &shared);
                     return;
                 }
             };
             set_status(&shared, "attach_verify", None, "正在附着 APP 固件 RTT…");
-            let _ = app.emit("prod://status", shared.status.lock().clone());
+            emit_status(&app, &shared);
             let rtt = match attach_rtt(&app, &shared, &stop, &mut core) {
                 Ok(r) => r,
                 Err(e) => {
                     set_status(&shared, "attach_verify", Some(false), e);
-                    let _ = app.emit("prod://status", shared.status.lock().clone());
-                    write_result(&shared, &cfg, &shared.status.lock().report, false, "attach_verify");
+                    emit_status(&app, &shared);
                     return;
                 }
             };
@@ -425,22 +414,19 @@ fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, sha
                 Ok(()) => set_status(&shared, "done", Some(true), "启动验证通过，流程完成 PASS"),
                 Err(e) => {
                     set_status(&shared, "done", Some(false), e);
-                    let _ = app.emit("prod://status", shared.status.lock().clone());
-                    write_result(&shared, &cfg, &shared.status.lock().report, false, "done");
+                    emit_status(&app, &shared);
                     return;
                 }
             }
         }
-        let report = shared.status.lock().report.clone();
-        let _ = app.emit("prod://status", shared.status.lock().clone());
-        write_result(&shared, &cfg, &report, true, "done");
+        emit_status(&app, &shared);
 
         if !cfg.auto_next {
             return;
         }
         // 连续多台：等待操作员换板后点「下一台」
         set_status(&shared, "wait_next", Some(true), "本台 PASS，换板后点『下一台』继续");
-        let _ = app.emit("prod://status", shared.status.lock().clone());
+        emit_status(&app, &shared);
         {
             let mut gate = shared.next_gate.0.lock();
             loop {

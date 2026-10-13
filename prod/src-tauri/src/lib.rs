@@ -10,6 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use probe_rs::probe::list::Lister;
+use probe_rs::rtt::{Rtt, ScanRegion};
+use probe_rs::{CoreStatus, Permissions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -38,20 +41,18 @@ fn list_probes() -> Result<Vec<ProbeInfo>, String> {
     rtt::list_probes()
 }
 
-/// 生产流程线程独占探针，这里「连接」只记录选择的探针（不做 RTT 附着），
-/// 真正占用探针发生在 start_pipeline 打开会话时。
+/// 「连接」= 探针自检：打开探针、附着芯片、尝试读 RTT 首行以确认固件在跑，随后释放探针。
+/// 用 spawn_blocking 执行：Tauri 同步 command 跑在主线程，probe 附着 + 读 RTT 可能耗时，会冻结 UI。
 #[tauri::command]
-fn connect(app: AppHandle, state: State<AppState>, probe_index: usize, chip: String) -> Result<(), String> {
-    let name = rtt::list_probes()
-        .ok()
-        .and_then(|v| v.into_iter().nth(probe_index))
-        .map(|p| p.name)
-        .ok_or_else(|| format!("未找到探针 #{probe_index}"))?;
-    *state.probe_name.lock() = Some(name.clone());
+async fn connect(app: AppHandle, state: State<'_, AppState>, probe_index: usize, chip: String) -> Result<(), String> {
+    let (name, message) = tauri::async_runtime::spawn_blocking(move || probe_selfcheck(probe_index, &chip))
+        .await
+        .map_err(|e| format!("连接任务失败: {e}"))??;
+    *state.probe_name.lock() = Some(name);
     let status = Status {
         connected: true,
         state: "attached".to_string(),
-        message: format!("已选择探针 {name}（{chip}）"),
+        message,
         hint: None,
         attempts: 0,
     };
@@ -59,8 +60,58 @@ fn connect(app: AppHandle, state: State<AppState>, probe_index: usize, chip: Str
     Ok(())
 }
 
+fn probe_selfcheck(probe_index: usize, chip: &str) -> Result<(String, String), String> {
+    let info = Lister::new()
+        .list_all()
+        .into_iter()
+        .nth(probe_index)
+        .ok_or_else(|| format!("未找到探针 #{probe_index}"))?;
+    let name = info.identifier.clone();
+    let probe = info.open().map_err(|e| format!("打开探针失败: {e}"))?;
+    let mut session = probe
+        .attach(chip, Permissions::default())
+        .map_err(|e| format!("附着芯片 {chip} 失败: {e}"))?;
+    let mut core = session.core(0).map_err(|e| format!("选择核心失败: {e}"))?;
+    // 目标可能停在 halt 态（上一次烧录后），固件不跑就没有 RTT 控制块
+    if !matches!(core.status(), Ok(CoreStatus::Running)) {
+        let _ = core.run();
+    }
+    let rtt = Rtt::attach(&mut core)
+        .or_else(|_| Rtt::attach_region(&mut core, &ScanRegion::range(0x2000_0000..0x2000_5000)));
+    let message = match rtt {
+        Ok(mut r) => {
+            let mut buf = [0u8; 256];
+            let mut first = String::new();
+            if let Some(ch) = r.up_channel(0) {
+                for _ in 0..50 {
+                    if let Ok(n) = ch.read(&mut core, &mut buf) {
+                        if n > 0 {
+                            first = String::from_utf8_lossy(&buf[..n])
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if first.is_empty() {
+                format!("已连接 {name} · RTT 就绪（暂无日志）")
+            } else {
+                format!("已连接 {name} · {first}")
+            }
+        }
+        Err(_) => format!("已连接 {name}（未找到 RTT，固件可能未运行）"),
+    };
+    // session/core/rtt 在此作用域结束 drop，探针立即释放，不阻塞后续流程
+    Ok((name, message))
+}
+
 #[tauri::command]
-fn disconnect(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // 停止并回收流程线程，释放探针设备锁；否则流程结束后探针仍被占，只能重启应用重连
     {
         let taken = state.pipeline.lock().take();
@@ -106,9 +157,9 @@ fn get_snapshot(state: State<AppState>) -> Snapshot {
 }
 
 #[tauri::command]
-fn start_pipeline(
+async fn start_pipeline(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     cfg: PipelineConfig,
 ) -> Result<(), String> {
     {
@@ -119,8 +170,9 @@ fn start_pipeline(
             }
         }
     }
-    // 清理上一个流程线程；有界等待其退出
-    if let Some((handle, _)) = state.pipeline.lock().take() {
+    // 清理上一个流程线程；有界等待其退出。先 take 再 join，避免 join 期间持有 pipeline 锁。
+    let prev = state.pipeline.lock().take();
+    if let Some((handle, _)) = prev {
         if handle.is_finished() {
             let _ = handle.join();
         } else {
@@ -141,25 +193,19 @@ fn start_pipeline(
 }
 
 #[tauri::command]
-fn stop_pipeline(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    let taken = state.pipeline.lock().take();
-    let Some((handle, stop)) = taken else {
-        return Ok(());
-    };
-    stop.store(true, Ordering::Relaxed);
-    if handle.is_finished() {
-        let _ = handle.join();
-    } else {
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        std::thread::spawn(move || {
-            let _ = handle.join();
-            let _ = tx.send(());
-        });
-        if rx.recv_timeout(Duration::from_secs(3)).is_err() {
-            return Err("流程线程仍在释放（可能已卡死）：拔插探针后重试".to_string());
-        }
+async fn stop_pipeline(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // 只置停止标志并立即返回：非烧录阶段线程会在下一检查点退出；
+    // 烧录阶段是 probe-rs 黑盒调用无法中途打断，需等本次烧录结束。
+    // 不在此 join，避免 UI 在烧录期间卡死；线程回收由下一次 start_pipeline 的 join 兜底。
+    {
+        let conn = state.pipeline.lock();
+        let Some((_, stop)) = conn.as_ref() else {
+            return Ok(());
+        };
+        stop.store(true, Ordering::Relaxed);
     }
-    let _ = app.emit("prod://status", state.shared.status.lock().clone());
+    state.shared.status.lock().message = "正在停止…（烧录阶段需等本次烧录结束）".to_string();
+    pipeline::emit_status(&app, &state.shared);
     Ok(())
 }
 
