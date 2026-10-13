@@ -1,6 +1,6 @@
 # AD/DA 生产烧录校准（产线流水）
 
-Tauri 2 + React + TS + Vite + Tailwind v4。产线自动化：烧录 DUT 校准固件 → 自动校准 → 复检 PASS 后烧录 APP 固件 → 校验 APP 启动日志。连续多台 + SN。
+Tauri 2 + React + TS + Vite + Tailwind v4。产线自动化：烧录 DUT 校准固件 → 自动校准 → 复检 PASS 后烧录 APP 固件 → 校验 APP 启动日志。连续多台。
 
 ## 流程（单台）
 

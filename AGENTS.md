@@ -52,7 +52,7 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
 | `docs/` | 设计文档：`calibration-flash.md`（校准记录字节布局与系数语义） |
 | `tools/` | PC 端工具，不参与固件编译：`calib_host.py`（RS485 主控，充当校准协议的外部发起方）、`parse_calib_dump.py`（把固件 `calib: dump` 行还原成 Rust 工具输入表） |
 | `host/` | AD/DA 校准上位机（Tauri 2 + React + Vite + Tailwind），经 SWD/RTT **双向**控制 DUT：下行 `[0xA5,len,payload,crc32]` 命令帧（配置连线/启动/暂停/继续/重启/停止/手动写码/读 AD/查状态/复检（`OP_HOST_VERIFY`，直接以 Flash 现记录跳转写盘后复检流程）/复位并运行/`OP_HOST_MANUAL_*`），上行解析固件 `calib:` 日志并可视化。侧边栏分页界面（概览/自动校准/复检/手动校准/日志）：概览卡展示 DUT 设备/版本/板型与 REF 全量信息（`calib: ref board=/no-reply` + 逐通道校准状态），手动 tab 驱动单板采集→拟合→落盘→复检，复检 tab 下发 `OP_HOST_VERIFY` 后展示逐通道 `verify max/@set/rmse` 与 `mode="verify"` 误差曲线（数据源 `verify_grid`/`verify_samples`），另有前误差/拟合残差/复检误差曲线。自动校准页按 DUT `board_dir` 切换标签：DA 方向 `DA chN ← REF AD chM`、AD 方向 `AD chN ← REF DA chM`。连接层：附着后强制目标运行（`core.status()/run()`）、RTT 找不到时按错误变体给排障 `hint`、`disconnect` 有界且不持 `conn` 锁。不参与固件编译，自带 `flake.nix` 与 `src-tauri`（probe-rs） |
-| `prod/` | 产线烧录校准上位机（Tauri 2 + React + Vite + Tailwind，派生自 `host/`）。自动化单台流水：烧录 DUT 校准固件 → 附着 RTT → 自动校准（下行 CONFIG+START 帧、上行日志喂 `calib::Parser`）→ 复检 **PASS** 才烧录 APP 固件 → 附着 APP 校验启动日志（须见 `Device: … App Version: …` 与 `Init success`）。支持连续多台（PASS 后停 `wait_next`、点「下一台」继续）+ SN。烧录用 `DownloadOptions{do_chip_erase:false, keep_unwritten_bytes:true}` 保护校准扇区 `0x0800F000`；REF 是产线夹具，本工具只处理 DUT。后端 `src-tauri/src/{flash.rs,pipeline.rs}`（`pipeline.rs` 纯函数 `verify_log_pass`/`calib_pass` 有单测），前端单页：`PipelinePanel`（配置 + 步骤条）+ `CalibrationPanel`（DUT/REF 连接状态与状态卡 + 校准图表/结果），日志为可折叠抽屉（默认隐藏）。不参与固件编译，自带 `flake.nix` |
+| `prod/` | 产线烧录校准上位机（Tauri 2 + React + Vite + Tailwind，派生自 `host/`）。自动化单台流水：烧录 DUT 校准固件 → 附着 RTT → 自动校准（下行 CONFIG+START 帧、上行日志喂 `calib::Parser`）→ 复检 **PASS** 才烧录 APP 固件 → 附着 APP 校验启动日志（须见 `Device: … App Version: …` 与 `Init success`）。支持连续多台（PASS 后停 `wait_next`、点「下一台」继续）。烧录用 `DownloadOptions{do_chip_erase:false, keep_unwritten_bytes:true}` 保护校准扇区 `0x0800F000`；REF 是产线夹具，本工具只处理 DUT。后端 `src-tauri/src/{flash.rs,pipeline.rs}`（`pipeline.rs` 纯函数 `verify_log_pass`/`calib_pass` 有单测），前端单页：`PipelinePanel`（配置 + 步骤条）+ `CalibrationPanel`（DUT/REF 连接状态与状态卡 + 校准图表/结果），日志为可折叠抽屉（默认隐藏）。不参与固件编译，自带 `flake.nix` |
 | `Board/<BOARD>/` | 板级代码：`Board.h/.cpp`、芯片驱动、`project/` |
 | `Board/<BOARD>/project/{inc,src}/` | AT32 Workbench 生成：`main.c`、`at32f425_wk_config.c`、`at32f425_int.c`、`wk_system.c` |
 | `Board/project/` | 新板型模板/存档，**不参与编译**（`BOARD` 从不等于 `project`） |
@@ -152,7 +152,7 @@ cd prod && nix develop --command npm run build        # 前端 tsc + vite 构建
 cd prod && nix develop --command cargo test --manifest-path src-tauri/Cargo.toml  # 纯函数单测（无需硬件）
 ```
 
-- 生产流程：选探针/芯片/板型/SN → 选 DUT 校准固件 + APP 固件 ELF/HEX + ch_mask + REF DA 源 → 「开始流程」。流程见 `prod/README.md`。
+- 生产流程：选探针/芯片 → 选 DUT 校准固件 + APP 固件 ELF/HEX + ch_mask + REF DA 源 → 「开始流程」。流程见 `prod/README.md`。
 - 核心不变式：**复检 PASS 才烧录 APP**；FAIL/超时/连接失败即停止。烧录保护校准扇区 `0x0800F000`。
 - 与 `host/` 共用 probe-rs 独占探针约束，运行期间不要同时执行固件仓库 `just run`/`just attach`。
 

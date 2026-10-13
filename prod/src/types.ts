@@ -106,12 +106,10 @@ export interface Snapshot {
 export interface PipelineConfig {
   probe_index: number;
   chip: string;
-  board: string;
   dut_path: string;
   app_path: string;
   ch_mask: number;
   ref_da: number[];
-  sn: string | null;
   auto_next: boolean;
 }
 

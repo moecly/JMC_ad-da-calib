@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { PipelineConfig, PipelineStatus, ProbeInfo } from "../types";
 import * as api from "../lib/ipc";
-import { Button, Card, CardTitle, Field, Input, Pill, Segmented, Select, Switch } from "./ui";
+import { Button, Card, CardTitle, Field, Input, Pill, Select, Switch } from "./ui";
 
 interface Props {
   probes: ProbeInfo[];
@@ -10,7 +10,6 @@ interface Props {
   onRefreshProbes: () => Promise<ProbeInfo[]>;
 }
 
-const BOARDS = ["AD_4CH", "DA_4CH"];
 const CH_LABELS = ["ch0", "ch1", "ch2", "ch3"];
 const STEPS = ["flash_dut", "attach_calib", "run_calib", "flash_app", "attach_verify"] as const;
 
@@ -34,12 +33,10 @@ const okTone = (ok: boolean | null) =>
 export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
   const [probeIndex, setProbeIndex] = useState(0);
   const [chip, setChip] = useState("AT32F425K8T7");
-  const [boardIdx, setBoardIdx] = useState(0);
   const [dutPath, setDutPath] = useState(() => localStorage.getItem("prod.dutPath") ?? "");
   const [appPath, setAppPath] = useState(() => localStorage.getItem("prod.appPath") ?? "");
   const [chMask, setChMask] = useState(0x0f);
   const [refDa, setRefDa] = useState<string[]>(["0", "1", "2", "3"]);
-  const [sn, setSn] = useState("");
   const [autoNext, setAutoNext] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,12 +72,10 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
     const cfg: PipelineConfig = {
       probe_index: probeIndex,
       chip,
-      board: BOARDS[boardIdx],
       dut_path: dutPath,
       app_path: appPath,
       ch_mask: chMask,
       ref_da: refDa.map((s) => Number(s)),
-      sn: sn.trim() || null,
       auto_next: autoNext,
     };
     try {
@@ -129,21 +124,6 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
           </Field>
           <Field label="芯片">
             <Input value={chip} disabled={disabled} onChange={(e) => setChip(e.currentTarget.value)} />
-          </Field>
-          <Field label="板型">
-            <Segmented
-              value={boardIdx}
-              onChange={setBoardIdx}
-              options={BOARDS.map((b, i) => ({ value: i, label: b }))}
-            />
-          </Field>
-          <Field label="序列号 (SN)">
-            <Input
-              value={sn}
-              disabled={disabled}
-              placeholder="留空自动生成 UNKNOWN"
-              onChange={(e) => setSn(e.currentTarget.value)}
-            />
           </Field>
           <Field label="校准固件 (DUT)">
             <div className="flex gap-2">

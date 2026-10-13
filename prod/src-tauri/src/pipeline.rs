@@ -26,12 +26,10 @@ const MAX_LINES: usize = 5000;
 pub struct PipelineConfig {
     pub probe_index: usize,
     pub chip: String,
-    pub board: String,
     pub dut_path: PathBuf,
     pub app_path: PathBuf,
     pub ch_mask: u8,
     pub ref_da: [u8; 4],
-    pub sn: Option<String>,
     pub auto_next: bool,
 }
 
