@@ -33,7 +33,7 @@ npm run build               # 前端 tsc + vite 构建
 - REF 板是产线夹具，本工具只处理 DUT，从不烧录/校验 REF。
 - 探针由 probe-rs 独占：运行期间不要同时执行固件仓库的 `just run` / `just attach`。
 - 单台流程结束（PASS 或失败）后，主按钮显示「重新运行」，点它即从头重复整条流水；上一轮线程与探针会在重新启动时回收后重开。
-- 流程线程退出即把顶栏连接状态置为「已断开」（探针随会话释放，UI 不再常驻「已连接」）；下一台板可直接点「重新运行」，「连接」自检非必需。
+- 流程线程退出即把 `running` 置 false 并广播给 UI：主按钮恢复可用、`停止` 按钮消失。**界面没有独立的「连接」步骤**——探针选择/芯片名/固件/参数都在「流程配置」里，直接点「开始流程」即可，会话由流程线程自行开关；日志开关是右下角浮动按钮。
 - 无硬件验证：`cargo test` 覆盖纯函数逻辑（日志判据、校准 PASS/FAIL 判定），烧录/附着/RTT 需两块板 + 探针在环验证。
 - `prod/` 是嵌套在固件仓库里的 flake；`nix develop` 只认 git 已跟踪的文件，未 `git add` 时 `prod/flake.nix` 对 nix 不可见，需先 `git add prod/`。
 - devShell 的 `shellHook` 会给 `RUSTFLAGS` 追加一条 `-L<glibc>/lib`：本机 nix gcc wrapper 未把 glibc 目录放入链接搜索路径，缺它则链接 tauri 依赖时报 `undefined reference to free_sized@GLIBC_2.43`。

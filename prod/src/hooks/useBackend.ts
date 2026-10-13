@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import type { LogLine, PipelineStatus, ProbeInfo, Snapshot } from "../types";
+import type { LogLine, PipelineStatus, ProbeInfo } from "../types";
 import * as api from "../lib/ipc";
 
 const MAX_LINES = 2000;
 
 export function useBackend() {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [pipeline, setPipeline] = useState<PipelineStatus | null>(null);
   const [lines, setLines] = useState<LogLine[]>([]);
   const [probes, setProbes] = useState<ProbeInfo[]>([]);
@@ -14,10 +13,9 @@ export function useBackend() {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     (async () => {
-      const snap = await api.getSnapshot();
+      const buffered = await api.getLog();
       if (disposed) return;
-      setSnapshot(snap);
-      setLines(snap.lines.slice(-MAX_LINES));
+      setLines(buffered.slice(-MAX_LINES));
       const pipe = await api.getPipelineStatus();
       if (disposed) return;
       setPipeline(pipe);
@@ -30,7 +28,6 @@ export function useBackend() {
         }),
         await api.onStatus((status) => setPipeline(status)),
         await api.onReport((report) => setPipeline((prev) => (prev ? { ...prev, report } : prev))),
-        await api.onConnStatus((status) => setSnapshot((prev) => (prev ? { ...prev, status } : prev))),
       );
     })();
     return () => {
@@ -56,12 +53,10 @@ export function useBackend() {
   }, []);
 
   return {
-    snapshot,
     pipeline,
     lines,
     probes,
     refreshProbes,
     clearAll,
-    api,
   };
 }

@@ -247,9 +247,11 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
           <Button variant="primary" disabled={disabled} onClick={() => void start()}>
             {isDone ? "重新运行" : "开始流程"}
           </Button>
-          <Button variant="danger" disabled={!running || busy} onClick={() => void stop()}>
-            停止
-          </Button>
+          {running && (
+            <Button variant="danger" disabled={busy} onClick={() => void stop()}>
+              停止
+            </Button>
+          )}
           <Button size="sm" disabled={busy} onClick={() => void onRefreshProbes()}>
             刷新探针
           </Button>

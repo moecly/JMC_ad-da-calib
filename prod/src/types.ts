@@ -114,21 +114,6 @@ export interface ProbeInfo {
   serial: string | null;
 }
 
-export interface Status {
-  connected: boolean;
-  state: string;
-  message: string;
-  hint: string | null;
-  attempts: number;
-}
-
-export interface Snapshot {
-  status: Status;
-  probe_name: string | null;
-  lines: LogLine[];
-  report: CalibReport;
-}
-
 export interface PipelineConfig {
   probe_index: number;
   chip: string;

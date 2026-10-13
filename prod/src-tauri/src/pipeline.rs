@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter};
 use crate::calib::{CalibReport, Parser};
 use crate::flash;
 use crate::proto::{self, CalibParams};
-use crate::rtt::{parse_line, LogLine, Status};
+use crate::rtt::{hint_for, parse_line, LogLine};
 
 pub const CALIB_TIMEOUT_SECS: u64 = 600;
 pub const VERIFY_LOG_LINES: usize = 80;
@@ -60,26 +60,6 @@ impl Default for PipelineStatus {
 #[derive(Default)]
 pub struct PipelineShared {
     pub status: Mutex<PipelineStatus>,
-    // 连接状态由流程线程在结束时归零（探针随 session drop 归还），避免 UI 常驻「已连接」
-    pub conn_status: Arc<Mutex<Status>>,
-    pub probe_name: Mutex<Option<String>>,
-}
-
-impl PipelineShared {
-    /// 流程结束（PASS/FAIL/中止）即把连接状态归零：探针已随 session drop 归还，
-    /// 若继续显示「已连接」，操作员会以为探针仍被占用。下一台板重新点「连接」自检。
-    pub fn mark_disconnected(&self) -> Status {
-        *self.probe_name.lock() = None;
-        let status = Status {
-            connected: false,
-            state: "disconnected".to_string(),
-            message: "流程结束，已断开探针".to_string(),
-            hint: None,
-            attempts: 0,
-        };
-        *self.conn_status.lock() = status.clone();
-        status
-    }
 }
 
 /// APP 启动校验是否通过：固件上电打印 `Device: <板型>, App Version: vX.Y`、`Init success`，
@@ -233,7 +213,7 @@ fn attach_rtt(
                 emit_status(&app, &shared);
                 sleep(Duration::from_millis(500));
                 if tries >= ATTACH_MAX_TRIES {
-                    return Err(format!("未找到 RTT 控制块: {e}"));
+                    return Err(format!("未找到 RTT 控制块: {e}；{}", hint_for(&e)));
                 }
             }
         }
@@ -362,29 +342,21 @@ fn run_verify_log(
     }
 }
 
-struct ActiveGuard(Arc<PipelineShared>);
-
-impl Drop for ActiveGuard {
-    fn drop(&mut self) {
-        self.0.status.lock().running = false;
-    }
-}
-
-struct ConnGuard {
+struct ActiveGuard {
     app: AppHandle,
     shared: Arc<PipelineShared>,
 }
 
-impl Drop for ConnGuard {
+impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        let status = self.shared.mark_disconnected();
-        let _ = self.app.emit("rtt://status", status);
+        self.shared.status.lock().running = false;
+        // 线程退出即广播：只清 running 不发事件，前端会一直停在「运行中」，按钮态不恢复
+        emit_status(&self.app, &self.shared);
     }
 }
 
 fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, shared: Arc<PipelineShared>) {
-    let _active = ActiveGuard(shared.clone());
-    let _conn = ConnGuard {
+    let _active = ActiveGuard {
         app: app.clone(),
         shared: shared.clone(),
     };
@@ -548,24 +520,6 @@ mod tests {
     #[test]
     fn calib_pass_pending() {
         assert_eq!(calib_pass(&report(None)), None);
-    }
-
-    #[test]
-    fn mark_disconnected_clears_conn_state() {
-        let shared = PipelineShared::default();
-        *shared.probe_name.lock() = Some("Probe A".to_string());
-        *shared.conn_status.lock() = Status {
-            connected: true,
-            state: "connected".to_string(),
-            message: "已连接".to_string(),
-            hint: None,
-            attempts: 0,
-        };
-        let s = shared.mark_disconnected();
-        assert!(!s.connected);
-        assert_eq!(s.state, "disconnected");
-        assert!(!shared.conn_status.lock().connected);
-        assert!(shared.probe_name.lock().is_none());
     }
 
     #[test]
