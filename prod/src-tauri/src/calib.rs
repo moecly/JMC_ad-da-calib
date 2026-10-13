@@ -581,6 +581,8 @@ impl Parser {
                 }
             } else if rest.contains("resid>") {
                 self.report.errors.push(rest.to_string());
+                // 固件此行走 LogError 后立即 EnterFail：不置 fail 会让上位机等到 600 s 超时才停
+                self.report.phase = "fail".to_string();
                 return true;
             }
             return false;
@@ -955,6 +957,19 @@ mod tests {
         assert!(parser.feed("calib: error ref mismatch"));
         assert!(!parser.report.errors.is_empty());
         assert_eq!(parser.report.phase, "fail");
+    }
+
+    #[test]
+    fn resid_over_limit_is_failure() {
+        let mut parser = Parser::new();
+        assert!(parser.feed("calib: state fit"));
+        assert!(parser.feed("calib: ch2 resid max=98.0 @ideal=63000 rmse=12.0"));
+        assert_eq!(parser.report.phase, "fit");
+        assert_eq!(parser.report.channels[2].resid.as_ref().unwrap().max, 98.0);
+
+        assert!(parser.feed("calib: ch2 resid>50 at: 63000(98)"));
+        assert_eq!(parser.report.phase, "fail");
+        assert!(parser.report.errors.iter().any(|e| e.contains("resid>50")));
     }
 
     #[test]

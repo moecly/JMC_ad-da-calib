@@ -177,11 +177,6 @@ void LedSet(bool on) {
 
 void LedToggle() { LedSet(!s_ledOn); }
 
-void EnterFail() {
-    s_state = S_FAIL;
-    s_failMs = 0;
-}
-
 const char* StateName() {
     if (s_paused) return "paused";
     switch (s_state) {
@@ -202,6 +197,12 @@ void PrintState() {
     char msg[48];
     snprintf(msg, sizeof(msg), "calib: state %s", StateName());
     LogInfo << msg;
+}
+
+void EnterFail() {
+    s_state = S_FAIL;
+    s_failMs = 0;
+    PrintState();
 }
 
 void ConfigFromMask() {
