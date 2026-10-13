@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::calib::{CalibReport, Parser};
 use crate::flash;
+use crate::proto::{self, CalibParams};
 use crate::rtt::{parse_line, LogLine};
 
 pub const CALIB_TIMEOUT_SECS: u64 = 600;
@@ -30,6 +31,7 @@ pub struct PipelineConfig {
     pub app_path: PathBuf,
     pub ch_mask: u8,
     pub ref_da: [u8; 4],
+    pub params: CalibParams,
 }
 
 #[derive(Clone, Serialize)]
@@ -69,8 +71,12 @@ pub fn verify_log_pass(lines: &[String]) -> bool {
     has_device && has_init
 }
 
-/// 校准是否通过：以固件复检结论 `calib: verify PASS/FAIL` 为准（解析器写入 `verify_pass`）。
+/// 校准是否通过：复检被跳过（以拟合残差门限放行）时以落盘结论为准，
+/// 否则以固件复检结论 `calib: verify PASS/FAIL` 为准（解析器写入 `verify_pass`）。
 pub fn calib_pass(report: &CalibReport) -> Option<bool> {
+    if report.verify_skipped {
+        return Some(report.saved);
+    }
     report.verify_pass
 }
 
@@ -190,8 +196,9 @@ fn run_calib(
         };
         down.write(core, frame).map(|_| ()).map_err(|e| format!("下发命令失败: {e}"))
     };
-    send(&mut rtt, core, &crate::proto::config(cfg.ch_mask & 0x0F, cfg.ref_da))?;
-    send(&mut rtt, core, &crate::proto::start())?;
+    send(&mut rtt, core, &proto::params(&cfg.params))?;
+    send(&mut rtt, core, &proto::config(cfg.ch_mask & 0x0F, cfg.ref_da))?;
+    send(&mut rtt, core, &proto::start())?;
 
     let mut buf = [0u8; 1024];
     let mut pending: Vec<u8> = Vec::new();
@@ -430,9 +437,26 @@ mod tests {
         r
     }
 
+    fn report_skipped(saved: bool) -> CalibReport {
+        let mut r = CalibReport::default();
+        r.verify_skipped = true;
+        r.saved = saved;
+        r
+    }
+
     #[test]
     fn calib_pass_true() {
         assert_eq!(calib_pass(&report(Some(true))), Some(true));
+    }
+
+    #[test]
+    fn calib_pass_skipped_saved() {
+        assert_eq!(calib_pass(&report_skipped(true)), Some(true));
+    }
+
+    #[test]
+    fn calib_pass_skipped_not_saved() {
+        assert_eq!(calib_pass(&report_skipped(false)), Some(false));
     }
 
     #[test]

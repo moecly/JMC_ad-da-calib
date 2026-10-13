@@ -63,6 +63,19 @@ pub struct ManualReport {
     pub errors: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FwParams {
+    pub gate: u16,
+    pub resid: u16,
+    pub stable: u16,
+    pub settle: u16,
+    pub first: u16,
+    pub samp: u16,
+    pub refsamp: u16,
+    pub n: u16,
+    pub skipv: bool,
+}
+
 #[derive(Clone, Default, Serialize)]
 pub struct CalibReport {
     pub role: Option<String>,
@@ -76,6 +89,8 @@ pub struct CalibReport {
     pub saved: bool,
     pub verify_started: bool,
     pub verify_pass: Option<bool>,
+    pub verify_skipped: bool,
+    pub fw_params: Option<FwParams>,
     pub valid_mask: u16,
     pub run_ch: Option<usize>,
     pub ad_read: [Option<f64>; 4],
@@ -118,6 +133,12 @@ static MRES_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static MVERIFY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^mverify ch=(\d+) max=([-0-9.eE+]+) @ideal=(\d+) rmse=([-0-9.eE+]+)$").unwrap()
+});
+static PARAMS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^params gate=(\d+) resid=(\d+) stable=(\d+) settle=(\d+) first=(\d+) samp=(\d+) refsamp=(\d+) n=(\d+) skipv=(\d+)$",
+    )
+    .unwrap()
 });
 
 pub fn poly_eval(coeff: &[f64; 4], x: f64) -> f64 {
@@ -194,6 +215,8 @@ fn fresh_report() -> CalibReport {
         saved: false,
         verify_started: false,
         verify_pass: None,
+        verify_skipped: false,
+        fw_params: None,
         valid_mask: 0,
         run_ch: None,
         ad_read: [None; 4],
@@ -224,6 +247,7 @@ impl Parser {
             board_dir: old.board_dir,
             record_loaded: old.record_loaded,
             ref_info: old.ref_info,
+            fw_params: old.fw_params,
             ..fresh_report()
         };
     }
@@ -494,6 +518,26 @@ impl Parser {
         if rest == "saved" {
             self.report.saved = true;
             self.report.phase = "verify".to_string();
+            return true;
+        }
+
+        if rest == "verify skipped" {
+            self.report.verify_skipped = true;
+            return true;
+        }
+
+        if let Some(c) = PARAMS_RE.captures(rest) {
+            self.report.fw_params = Some(FwParams {
+                gate: parse_u16(&c[1]),
+                resid: parse_u16(&c[2]),
+                stable: parse_u16(&c[3]),
+                settle: parse_u16(&c[4]),
+                first: parse_u16(&c[5]),
+                samp: parse_u16(&c[6]),
+                refsamp: parse_u16(&c[7]),
+                n: parse_u16(&c[8]),
+                skipv: &c[9] == "1",
+            });
             return true;
         }
 
@@ -1049,5 +1093,52 @@ mod tests {
         assert_eq!(r.channels[0].verify_samples[5], 5003.0);
         assert!(r.channels[0].verify.is_some());
         assert_eq!(r.verify_pass, Some(true));
+    }
+
+    #[test]
+    fn parses_verify_skipped() {
+        // 跳过复检的完整固件序列：落盘后不得出现任何复检行
+        let mut parser = Parser::new();
+        let lines = [
+            "HostPoll|calib: reset",
+            "HostPoll|calib: role DUT",
+            "HostPoll|calib: params gate=50 resid=800 stable=20 settle=300 first=600 samp=5 refsamp=20 n=16 skipv=1",
+            "DoSweep|calib: dpt0 ch=0 ideal=0 meas=1.5",
+            "FitAll|calib: ch0 resid max=1.5 @ideal=0 rmse=0.5",
+            "DoSave|calib: saved",
+            "DoSave|calib: mask 0x1",
+            "DoSave|calib: verify skipped",
+            "DutTick|calib: state done",
+        ];
+        for l in lines {
+            let (source, msg) = l.split_once('|').unwrap();
+            let line = crate::rtt::parse_line(&format!("[INFO] CalibProc.cpp:1 ({source}): {msg}"));
+            assert!(parser.feed(&line.message), "{l}");
+        }
+        assert!(parser.report.saved);
+        assert!(parser.report.verify_skipped);
+        assert_eq!(parser.report.fw_params.as_ref().unwrap().gate, 50);
+        // "verify skipped" 不得被 "verify " 前缀吞成复检流程行
+        assert!(!parser.report.verify_started);
+        assert_eq!(parser.report.verify_points, 0);
+        assert_eq!(parser.report.phase, "done");
+    }
+
+    #[test]
+    fn parses_fw_params() {
+        let mut parser = Parser::new();
+        assert!(parser.feed(
+            "calib: params gate=50 resid=800 stable=20 settle=300 first=600 samp=5 refsamp=20 n=16 skipv=1"
+        ));
+        let p = parser.report.fw_params.clone().unwrap();
+        assert_eq!(p.gate, 50);
+        assert_eq!(p.resid, 800);
+        assert_eq!(p.stable, 20);
+        assert_eq!(p.settle, 300);
+        assert_eq!(p.first, 600);
+        assert_eq!(p.samp, 5);
+        assert_eq!(p.refsamp, 20);
+        assert_eq!(p.n, 16);
+        assert!(p.skipv);
     }
 }

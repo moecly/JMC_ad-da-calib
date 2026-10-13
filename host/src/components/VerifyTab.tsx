@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CalibReport } from "../types";
+import type { CalibParamsCtl } from "../hooks/useCalibParams";
 import * as api from "../lib/ipc";
 import { Button, Card, CardTitle, Pill, type Tone } from "./ui";
 import { ChannelLinkMatrix } from "./ChannelLinkMatrix";
@@ -11,7 +12,7 @@ const num = (v: number | null | undefined, digits = 2) =>
 const boardLabel = (dir: string | null | undefined) =>
   dir === "ad" ? "AD 采集板" : dir === "da" ? "DA 输出板" : "—";
 
-export function VerifyTab({ connected, report }: { connected: boolean; report: CalibReport | null }) {
+export function VerifyTab({ connected, report, ctl }: { connected: boolean; report: CalibReport | null; ctl: CalibParamsCtl }) {
   const [enabled, setEnabled] = useState<boolean[]>([false, false, false, false]);
   const [daSel, setDaSel] = useState<number[]>([0, 0, 0, 0]);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +66,12 @@ export function VerifyTab({ connected, report }: { connected: boolean; report: C
             variant="primary"
             size="sm"
             disabled={!connected || !isDut || maskOf() === 0}
-            onClick={() => run(() => api.calibVerify(maskOf(), daSel))}
+            onClick={() =>
+              run(async () => {
+                await ctl.apply();
+                await api.calibVerify(maskOf(), daSel);
+              })
+            }
           >
             开始复检
           </Button>

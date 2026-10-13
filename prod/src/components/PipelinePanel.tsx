@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { PipelineConfig, PipelineStatus, ProbeInfo } from "../types";
+import type { CalibParams, PipelineConfig, PipelineStatus, ProbeInfo } from "../types";
 import * as api from "../lib/ipc";
-import { Button, Card, CardTitle, Field, Input, Pill, Select } from "./ui";
+import { Button, Card, CardTitle, Field, Input, Pill, Select, Switch } from "./ui";
 
 interface Props {
   probes: ProbeInfo[];
@@ -12,6 +12,38 @@ interface Props {
 
 const CH_LABELS = ["ch0", "ch1", "ch2", "ch3"];
 const STEPS = ["flash_dut", "attach_calib", "run_calib", "flash_app", "attach_verify"] as const;
+
+const DEFAULT_PARAMS: CalibParams = {
+  residual_limit: 1000,
+  check_gate: 16,
+  stable_code: 20,
+  settle_ms: 200,
+  first_settle_ms: 600,
+  sample_interval_ms: 5,
+  ref_sample_interval_ms: 20,
+  stable_count: 16,
+  skip_verify: false,
+};
+
+const NUM_FIELDS: Array<{ key: keyof CalibParams; label: string; min: number; max: number }> = [
+  { key: "check_gate", label: "复检门限 (code)", min: 0, max: 65535 },
+  { key: "residual_limit", label: "拟合残差门限 (code)", min: 0, max: 65535 },
+  { key: "stable_code", label: "不稳定极差 (code)", min: 0, max: 65535 },
+  { key: "settle_ms", label: "建压等待 (ms)", min: 1, max: 65535 },
+  { key: "first_settle_ms", label: "首点建压 (ms)", min: 1, max: 65535 },
+  { key: "sample_interval_ms", label: "AD 采样间隔 (ms)", min: 1, max: 65535 },
+  { key: "ref_sample_interval_ms", label: "DA 采样间隔 (ms)", min: 1, max: 65535 },
+  { key: "stable_count", label: "采样次数", min: 1, max: 32 },
+];
+
+function loadParams(): CalibParams {
+  try {
+    const raw = localStorage.getItem("prod.calibParams");
+    return raw ? { ...DEFAULT_PARAMS, ...(JSON.parse(raw) as Partial<CalibParams>) } : DEFAULT_PARAMS;
+  } catch {
+    return DEFAULT_PARAMS;
+  }
+}
 
 const stepLabel = (step: string) =>
   (
@@ -36,6 +68,7 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
   const [appPath, setAppPath] = useState(() => localStorage.getItem("prod.appPath") ?? "");
   const [chMask, setChMask] = useState(0x0f);
   const [refDa, setRefDa] = useState<string[]>(["0", "1", "2", "3"]);
+  const [params, setParams] = useState<CalibParams>(loadParams);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +78,9 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
   useEffect(() => {
     localStorage.setItem("prod.appPath", appPath);
   }, [appPath]);
+  useEffect(() => {
+    localStorage.setItem("prod.calibParams", JSON.stringify(params));
+  }, [params]);
 
   const running = pipeline?.running ?? false;
   const disabled = busy || running;
@@ -74,6 +110,7 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
       app_path: appPath,
       ch_mask: chMask,
       ref_da: refDa.map((s) => Number(s)),
+      params,
     };
     try {
       await api.startPipeline(cfg);
@@ -98,6 +135,7 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
 
   const isDone = !!pipeline && !pipeline.running && pipeline.step !== "idle";
   const verifyPass = pipeline?.report?.verify_pass ?? null;
+  const skipped = pipeline?.report?.verify_skipped ?? false;
 
   return (
     <div className="flex flex-col gap-4">
@@ -169,6 +207,42 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
           </Field>
         </div>
 
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-medium text-ink-soft">校准参数（流程启动前下发，固件不持久化）</span>
+            <Switch
+              checked={params.skip_verify}
+              disabled={disabled}
+              onChange={(v) => setParams((p) => ({ ...p, skip_verify: v }))}
+              label="跳过复检（以拟合残差为准）"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            {NUM_FIELDS.map(({ key, label, min, max }) => (
+              <Field key={key} label={label}>
+                <Input
+                  type="number"
+                  min={min}
+                  max={max}
+                  className="w-24"
+                  disabled={disabled}
+                  value={String(params[key])}
+                  onChange={(e) => {
+                    const n = Number(e.currentTarget.value);
+                    if (!Number.isFinite(n)) return;
+                    setParams((p) => ({ ...p, [key]: Math.max(min, Math.min(max, Math.round(n))) }));
+                  }}
+                />
+              </Field>
+            ))}
+            <Field label=" ">
+              <Button size="sm" disabled={disabled} onClick={() => setParams(DEFAULT_PARAMS)}>
+                恢复默认
+              </Button>
+            </Field>
+          </div>
+        </div>
+
         <div className="mt-3 flex items-center gap-2">
           <Button variant="primary" disabled={disabled} onClick={() => void start()}>
             {isDone ? "重新运行" : "开始流程"}
@@ -189,8 +263,10 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
             <div className="flex items-center gap-2">
               {pipeline && (
                 <Pill
-                  label={verifyPass === null ? "复检 进行中" : verifyPass ? "复检 PASS" : "复检 FAIL"}
-                  tone={okTone(verifyPass)}
+                  label={
+                    skipped ? "复检 已跳过" : verifyPass === null ? "复检 进行中" : verifyPass ? "复检 PASS" : "复检 FAIL"
+                  }
+                  tone={skipped ? "amber" : okTone(verifyPass)}
                 />
               )}
               <Pill label={pipeline ? stepLabel(pipeline.step) : "待机"} tone={okTone(pipeline?.ok ?? null)} />

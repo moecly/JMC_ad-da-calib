@@ -33,7 +33,11 @@ export function CalibResult({ report }: Props) {
             <Pill label={`阶段 ${report.phase}`} tone="slate" />
             <Pill label={`点 ${report.points}/${report.total_points}`} tone="slate" />
             <Pill label={report.saved ? "已落盘" : "未落盘"} tone={report.saved ? "green" : "slate"} />
-            {report.verify_started && <Pill label={verifyLabel} tone={verifyTone} />}
+            {report.verify_skipped ? (
+              <Pill label="复检 已跳过" tone="amber" />
+            ) : (
+              report.verify_started && <Pill label={verifyLabel} tone={verifyTone} />
+            )}
           </div>
         }
       >

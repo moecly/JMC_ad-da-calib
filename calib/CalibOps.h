@@ -15,7 +15,7 @@ constexpr uint8_t OP_MODE_RAW = 0x00, OP_MODE_CAL = 0x01;
 // 上位机→DUT 控制协议（RTT 下行）
 constexpr uint8_t OP_HOST_CONFIG = 0x10, OP_HOST_START = 0x11, OP_HOST_PAUSE = 0x12, OP_HOST_RESUME = 0x13,
                   OP_HOST_RESTART = 0x14, OP_HOST_STOP = 0x15, OP_HOST_SET_DA = 0x16, OP_HOST_READ_AD = 0x17,
-                  OP_HOST_STATUS = 0x18, OP_HOST_VERIFY = 0x19;
+                  OP_HOST_STATUS = 0x18, OP_HOST_VERIFY = 0x19, OP_HOST_PARAMS = 0x1A;
 
 // DUT ↔ REF 信息查询（RS485）
 constexpr uint8_t OP_GET_INFO = 0x03, OP_ACK_INFO = 0x83;

@@ -252,6 +252,11 @@ fn calib_status(state: State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn calib_params(state: State<AppState>, p: proto::CalibParams) -> Result<(), String> {
+    push_command(&state, proto::params(&p))
+}
+
+#[tauri::command]
 fn calib_verify(state: State<AppState>, mask: u8, ref_da: Vec<u8>) -> Result<(), String> {
     if ref_da.len() != 4 {
         return Err("ref_da 需要 4 个元素".to_string());
@@ -329,6 +334,7 @@ pub fn run() {
             manual_set_da,
             manual_read_ad,
             calib_status,
+            calib_params,
             calib_verify,
             reset_target,
             manual_begin,

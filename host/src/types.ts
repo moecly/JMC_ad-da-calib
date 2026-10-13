@@ -58,6 +58,30 @@ export interface ManualReport {
   errors: string[];
 }
 
+export interface FwParams {
+  gate: number;
+  resid: number;
+  stable: number;
+  settle: number;
+  first: number;
+  samp: number;
+  refsamp: number;
+  n: number;
+  skipv: boolean;
+}
+
+export interface CalibParams {
+  residual_limit: number;
+  check_gate: number;
+  stable_code: number;
+  settle_ms: number;
+  first_settle_ms: number;
+  sample_interval_ms: number;
+  ref_sample_interval_ms: number;
+  stable_count: number;
+  skip_verify: boolean;
+}
+
 export interface CalibReport {
   role: string | null;
   phase: string;
@@ -70,6 +94,8 @@ export interface CalibReport {
   saved: boolean;
   verify_started: boolean;
   verify_pass: boolean | null;
+  verify_skipped: boolean;
+  fw_params: FwParams | null;
   valid_mask: number;
   run_ch: number | null;
   ad_read: (number | null)[];

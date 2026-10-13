@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useBackend } from "./hooks/useBackend";
+import { useCalibParams } from "./hooks/useCalibParams";
 import { ConnectionBar } from "./components/ConnectionBar";
 import { ControlPanel } from "./components/ControlPanel";
 import { CalibResult } from "./components/CalibResult";
@@ -7,19 +8,22 @@ import { ErrorChart } from "./components/ErrorChart";
 import { LogConsole } from "./components/LogConsole";
 import { ManualPanel } from "./components/ManualPanel";
 import { OverviewTab } from "./components/OverviewTab";
+import { ParamsTab } from "./components/ParamsTab";
 import { VerifyTab } from "./components/VerifyTab";
-import { IconCalib, IconLog, IconManual, IconOverview, IconVerify } from "./components/icons";
+import { IconCalib, IconLog, IconManual, IconOverview, IconParams, IconVerify } from "./components/icons";
 
 const TABS = [
   { label: "概览", Icon: IconOverview },
   { label: "自动校准", Icon: IconCalib },
   { label: "复检", Icon: IconVerify },
   { label: "手动校准", Icon: IconManual },
+  { label: "参数", Icon: IconParams },
   { label: "日志", Icon: IconLog },
 ];
 
 function App() {
   const { status, report, lines, probes, probeName, refreshProbes, clearAll } = useBackend();
+  const ctl = useCalibParams();
   const [tab, setTab] = useState(0);
 
   useEffect(() => {
@@ -56,7 +60,7 @@ function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <ConnectionBar probes={probes} status={status} probeName={probeName} onRefresh={refreshProbes} />
-        {tab === 4 ? (
+        {tab === 5 ? (
           <div className="min-h-0 flex-1">
             <LogConsole lines={lines} onClear={clearAll} />
           </div>
@@ -66,13 +70,14 @@ function App() {
               {tab === 0 && <OverviewTab status={status} report={report} probeName={probeName} />}
               {tab === 1 && (
                 <div className="flex flex-col gap-4">
-                  <ControlPanel connected={status.connected} report={report} />
+                  <ControlPanel connected={status.connected} report={report} ctl={ctl} />
                   <CalibResult report={report} />
                   <ErrorChart report={report} mode="sweep" />
                 </div>
               )}
-              {tab === 2 && <VerifyTab connected={status.connected} report={report} />}
-              {tab === 3 && <ManualPanel connected={status.connected} report={report} />}
+              {tab === 2 && <VerifyTab connected={status.connected} report={report} ctl={ctl} />}
+              {tab === 3 && <ManualPanel connected={status.connected} report={report} ctl={ctl} />}
+              {tab === 4 && <ParamsTab connected={status.connected} report={report} ctl={ctl} />}
             </div>
           </div>
         )}

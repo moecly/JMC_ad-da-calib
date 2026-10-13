@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CalibReport } from "../types";
+import type { CalibParamsCtl } from "../hooks/useCalibParams";
 import * as api from "../lib/ipc";
 import { Button, Card, CardTitle, Field, Input, Pill, Select } from "./ui";
 
@@ -7,7 +8,7 @@ const clamp = (v: number) => Math.max(0, Math.min(65535, v));
 
 const boardLabel = (dir: string | null) => (dir === "ad" ? "AD 采集板" : dir === "da" ? "DA 输出板" : "?");
 
-export function ManualPanel({ connected, report }: { connected: boolean; report: CalibReport | null }) {
+export function ManualPanel({ connected, report, ctl }: { connected: boolean; report: CalibReport | null; ctl: CalibParamsCtl }) {
   const [ch, setCh] = useState(0);
   const [vfs, setVfs] = useState("10.000");
   const [mode, setMode] = useState<"volt" | "code">("volt");
@@ -69,7 +70,12 @@ export function ManualPanel({ connected, report }: { connected: boolean; report:
             variant="primary"
             size="sm"
             disabled={!connected || !isManualFw || inManual}
-            onClick={() => run(api.manualBegin)}
+            onClick={() =>
+              run(async () => {
+                await ctl.apply();
+                await api.manualBegin();
+              })
+            }
           >
             开始手动校准
           </Button>
@@ -156,7 +162,17 @@ export function ManualPanel({ connected, report }: { connected: boolean; report:
           <Button size="sm" disabled={!ready} onClick={() => run(api.manualFit)}>
             拟合
           </Button>
-          <Button variant="primary" size="sm" disabled={!ready || !fitted} onClick={() => run(api.manualSave)}>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={!ready || !fitted}
+            onClick={() =>
+              run(async () => {
+                await ctl.apply();
+                await api.manualSave();
+              })
+            }
+          >
             写入 Flash
           </Button>
           {channel?.resid && (

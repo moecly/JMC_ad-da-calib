@@ -62,28 +62,39 @@ const uint16_t* const kGridLive = kGrid;
 
 // 建压等待；CALIB_SETTLE_MS 可覆盖，用于定位 DA/RC 建立时间不足
 #if defined(CALIB_SETTLE_MS)
-constexpr uint32_t kSettleMs = CALIB_SETTLE_MS;
+constexpr uint32_t kDefSettleMs = CALIB_SETTLE_MS;
 #else
-constexpr uint32_t kSettleMs = 200;
+constexpr uint32_t kDefSettleMs = 200;
 #endif
-// 首点建压：扫描/复检开始时 DA 从上电电平或上一点大跳变过来，kSettleMs 不足以完全建压，
+// 首点建压：扫描/复检开始时 DA 从上电电平或上一点大跳变过来，s_settleMs 不足以完全建压，
 // 会让低端锚点测偏 ~30 码（0 点测低 → 拟合记入坏锚点 → 复检在同一 set 上露出反向误差）。
 // 标定与复检两侧必须用同一值，否则两端读数不一致。CALIB_FIRST_SETTLE_MS 可覆盖
 #if defined(CALIB_FIRST_SETTLE_MS)
-constexpr uint32_t kFirstSettleMs = CALIB_FIRST_SETTLE_MS;
+constexpr uint32_t kDefFirstSettleMs = CALIB_FIRST_SETTLE_MS;
 #else
-constexpr uint32_t kFirstSettleMs = 600;
+constexpr uint32_t kDefFirstSettleMs = 600;
 #endif
-// 稳定判据：DA 建压等待后采 kStableCount 次，窗内极差 > kStableCode 只打 unstable 标记，不中断
-constexpr uint32_t kSampleIntervalMs = 5;
-constexpr int kStableCount = 16;
-constexpr int kStableCode = 20;
+// 稳定判据：DA 建压等待后采 s_stableTarget 次，窗内极差 > s_stableCode 只打 unstable 标记，不中断
+constexpr uint32_t kDefSampleIntervalMs = 5;
+constexpr int kDefStableCount = 16;
+constexpr int kDefStableCode = 20;
+constexpr int kWindowMax = 32;  // s_measWin 的固定上限，stable_count 运行时取值 1..kWindowMax
 constexpr uint32_t kReplyTimeoutMs = 20;
 constexpr int kRetryMax = 3;
 constexpr uint32_t kPingIntervalMs = 100;
 constexpr int kPingMax = 20;
-constexpr double kResidualLimitCode = 1000.0;
-constexpr double kCheckGateCode = 16.0;
+constexpr double kDefResidualLimit = 1000.0;
+constexpr double kDefCheckGate = 16.0;
+
+// 运行时可调参数（OP_HOST_PARAMS 下发；复位回默认，不落 Flash）
+uint32_t s_settleMs = kDefSettleMs;
+uint32_t s_firstSettleMs = kDefFirstSettleMs;
+uint32_t s_sampleIntervalMs = kDefSampleIntervalMs;
+int s_stableTarget = kDefStableCount;
+int s_stableCode = kDefStableCode;
+double s_residualLimit = kDefResidualLimit;
+double s_checkGate = kDefCheckGate;
+bool s_skipVerify = false;
 
 CalibRecord s_rec;
 
@@ -120,11 +131,11 @@ bool s_awaitReply = false;
 float s_measMin[4];
 float s_measMax[4];
 float s_measMid[4];
-float s_measWin[4][kStableCount];
+float s_measWin[4][kWindowMax];
 // REF 的 AD 值是 32 槽均值滤波的输出：单个坏样本（SPI/通道切换毛刺）进入后会把整窗抬升
 // ~5000/32≈156 码并持续 128 ms。采样间隔取 20 ms、窗长 320 ms 跨过滤波长度 + 取中值，
 // 使少数被污染的样本无法改变结果（实测复检随机 ~150~260 码超差即源于此）
-constexpr uint32_t kRefSampleIntervalMs = 20;
+uint32_t s_refSampleIntervalMs = 20;
 static inline float MedianWin(float* v, int n) {
     for (int i = 1; i < n; i++) {
         float key = v[i];
@@ -213,6 +224,37 @@ void ResetRunCounters() {
     s_waitMs = 0;
     s_verifyReported = false;
     s_verifyIdx = 0;
+}
+
+// 运行时可调参数帧（OP_HOST_PARAMS）。须在 START/VERIFY 之前下发——采样期只读当前值，
+// 运行中修改不生效；不落 Flash，复位回默认
+void ApplyParams(const uint8_t* p, uint8_t len) {
+    if (len < 17) {
+        LogError << "calib: error bad-op";
+        return;
+    }
+    auto rd16 = [](const uint8_t* q) { return (uint16_t)(q[0] | ((uint16_t)q[1] << 8)); };
+    s_residualLimit = rd16(p + 1);
+    s_checkGate = rd16(p + 3);
+    s_stableCode = rd16(p + 5);
+    s_settleMs = rd16(p + 7);
+    s_firstSettleMs = rd16(p + 9);
+    s_sampleIntervalMs = rd16(p + 11);
+    s_refSampleIntervalMs = rd16(p + 13);
+    int n = p[15];
+    s_stableTarget = n < 1 ? 1 : (n > kWindowMax ? kWindowMax : n);
+    s_skipVerify = (p[16] & 1) != 0;
+    if (s_residualLimit == 0) s_residualLimit = 1;
+    if (s_checkGate == 0) s_checkGate = 1;
+    if (s_sampleIntervalMs == 0) s_sampleIntervalMs = 1;
+    if (s_refSampleIntervalMs == 0) s_refSampleIntervalMs = 1;
+    char m[160];
+    snprintf(m, sizeof(m),
+             "calib: params gate=%u resid=%u stable=%u settle=%u first=%u samp=%u refsamp=%u n=%u skipv=%u",
+             (unsigned)s_checkGate, (unsigned)s_residualLimit, (unsigned)s_stableCode, (unsigned)s_settleMs,
+             (unsigned)s_firstSettleMs, (unsigned)s_sampleIntervalMs, (unsigned)s_refSampleIntervalMs,
+             (unsigned)s_stableTarget, s_skipVerify ? 1u : 0u);
+    LogInfo << m;
 }
 
 #if defined(CONFIG_CALIB_ROLE_REF)
@@ -434,7 +476,7 @@ void ManualSave() {
         snprintf(m, sizeof(m), "calib: mverify ch=%u max=%.1f @ideal=%u rmse=%.1f", (unsigned)ch, maxRes,
                  (unsigned)idealAt, sqrt(sumSq / n));
         LogInfo << m;
-        if (maxRes >= kCheckGateCode) pass = false;
+        if (maxRes >= s_checkGate) pass = false;
     }
     if (pass) {
         LogInfo << "calib: mverify PASS";
@@ -574,6 +616,13 @@ void HandleManual(const uint8_t* p, uint8_t len) {
             snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
             LogInfo << m;
             break;
+        case OP_HOST_PARAMS:
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+            } else {
+                ApplyParams(p, len);
+            }
+            break;
         default:
             LogError << "calib: error bad-op";
             break;
@@ -626,7 +675,7 @@ void HostPoll() {
     }
 }
 
-// AD 采点：与 DoSweep 的 PH_SETTLE 同节奏——先等 kSettleMs，再每 kSampleIntervalMs 采 kStableCount 次，
+// AD 采点：与 DoSweep 的 PH_SETTLE 同节奏——先等 s_settleMs，再每 s_sampleIntervalMs 采 s_stableTarget 次，
 // 取窗内 (min+max)/2
 void ManualTick() {
     HostPoll();
@@ -634,10 +683,10 @@ void ManualTick() {
     if (!s_sampling) return;
     s_mWaitMs++;
     if (s_mStable == 0) {
-        if (s_mWaitMs < kSettleMs) return;
+        if (s_mWaitMs < s_settleMs) return;
         s_mWaitMs = 0;
         s_mStable = 1;
-    } else if (s_mWaitMs < kSampleIntervalMs) {
+    } else if (s_mWaitMs < s_sampleIntervalMs) {
         return;
     } else {
         s_mWaitMs = 0;
@@ -645,7 +694,7 @@ void ManualTick() {
     uint16_t v = Bd().CalibAdRaw((uint8_t)s_samplingCh);
     if (v < s_mMin) s_mMin = v;
     if (v > s_mMax) s_mMax = v;
-    if (s_mStable < kStableCount) {
+    if (s_mStable < s_stableTarget) {
         s_mStable++;
         return;
     }
@@ -968,6 +1017,13 @@ void HandleHost(const uint8_t* p, uint8_t len) {
                 LogError << "calib: error busy";
             }
             break;
+        case OP_HOST_PARAMS:
+            if (s_state == S_IDLE || s_state == S_DONE || s_state == S_FAIL || s_paused) {
+                ApplyParams(p, len);
+            } else {
+                LogError << "calib: error busy";
+            }
+            break;
         default:
             LogError << "calib: error bad-op";
             break;
@@ -1116,10 +1172,10 @@ void DoSweep() {
         s_phase = PH_SEND;
         return;
 #else
-        // DA 方向：交替「发 OP_READ_AD → 收 ACK」攒窗，每点 kStableCount 次往返
+        // DA 方向：交替「发 OP_READ_AD → 收 ACK」攒窗，每点 s_stableTarget 次往返
         if (!s_awaitReply) {
-            // 采样间留 kRefSampleIntervalMs，使窗长(16×20ms=320ms)跨过 REF 的 128ms 均值滤波
-            if (s_stableCount > 0 && s_waitMs < kRefSampleIntervalMs) {
+            // 采样间留 s_refSampleIntervalMs，使窗长(16×20ms=320ms)跨过 REF 的 128ms 均值滤波
+            if (s_stableCount > 0 && s_waitMs < s_refSampleIntervalMs) {
                 s_waitMs++;
                 return;
             }
@@ -1159,16 +1215,16 @@ void DoSweep() {
             }
         }
         s_stableCount++;
-        if (s_stableCount < kStableCount) return;
+        if (s_stableCount < s_stableTarget) return;
         for (int ch = 0; ch < 4; ch++) {
-            s_measMid[ch] = MedianWin(s_measWin[ch], kStableCount);
+            s_measMid[ch] = MedianWin(s_measWin[ch], s_stableTarget);
         }
         for (int r = 0; r < s_runCount; r++) {
             uint8_t ch = s_runs[r].adCh;
             int src = s_runs[r].daCh;
             float mid = s_measMid[src];
             s_samples[ch][s_sweepIdx] = mid;
-            bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
+            bool settled = s_measMax[src] - s_measMin[src] <= (float)s_stableCode;
             char m[112];
             snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
                      (unsigned)kGridLive[s_sweepIdx], (double)mid, settled ? "" : " unstable");
@@ -1191,12 +1247,12 @@ void DoSweep() {
     if (s_phase == PH_SETTLE) {
         s_waitMs++;
 #if defined(CONFIG_DEVICE_AD_4CH)
-        // 先固定等 kSettleMs 让 DA 建压，之后每 kSampleIntervalMs 采一次，攒够 kStableCount 次
+        // 先固定等 s_settleMs 让 DA 建压，之后每 s_sampleIntervalMs 采一次，攒够 s_stableTarget 次
         if (s_stableCount == 0) {
-            if (s_waitMs < (s_sweepIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
+            if (s_waitMs < (s_sweepIdx == 0 ? s_firstSettleMs : s_settleMs)) return;
             s_waitMs = 0;
             s_stableCount = 1;
-        } else if (s_waitMs < kSampleIntervalMs) {
+        } else if (s_waitMs < s_sampleIntervalMs) {
             return;
         } else {
             s_waitMs = 0;
@@ -1206,13 +1262,13 @@ void DoSweep() {
             if (v < s_stableMin[ch]) s_stableMin[ch] = v;
             if (v > s_stableMax[ch]) s_stableMax[ch] = v;
         }
-        if (s_stableCount < kStableCount) {
+        if (s_stableCount < s_stableTarget) {
             s_stableCount++;
             return;
         }
         bool settled = true;
         for (int ch = 0; ch < 4; ch++) {
-            if (s_stableMax[ch] - s_stableMin[ch] > kStableCode) settled = false;
+            if (s_stableMax[ch] - s_stableMin[ch] > s_stableCode) settled = false;
         }
         for (int r = 0; r < s_runCount; r++) {
             uint8_t ch = s_runs[r].adCh;
@@ -1236,7 +1292,7 @@ void DoSweep() {
         AdvancePoint();
 #else
         // DA 方向：等 DA 建压后进入「多次读 REF AD」回环
-        if (s_waitMs < (s_sweepIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
+        if (s_waitMs < (s_sweepIdx == 0 ? s_firstSettleMs : s_settleMs)) return;
         s_waitMs = 0;
         s_stableCount = 0;
         s_awaitReply = false;
@@ -1343,8 +1399,8 @@ void DoVerifySweep() {
 #else
         // DA 方向：交替「发 OP_READ_AD → 收 ACK」攒窗
         if (!s_awaitReply) {
-            // 同 DoSweep：采样间留 kRefSampleIntervalMs，让窗跨过 REF 的 128ms 均值滤波
-            if (s_stableCount > 0 && s_waitMs < kRefSampleIntervalMs) {
+            // 同 DoSweep：采样间留 s_refSampleIntervalMs，让窗跨过 REF 的 128ms 均值滤波
+            if (s_stableCount > 0 && s_waitMs < s_refSampleIntervalMs) {
                 s_waitMs++;
                 return;
             }
@@ -1384,15 +1440,15 @@ void DoVerifySweep() {
             }
         }
         s_stableCount++;
-        if (s_stableCount < kStableCount) return;
+        if (s_stableCount < s_stableTarget) return;
         for (int ch = 0; ch < 4; ch++) {
-            s_measMid[ch] = MedianWin(s_measWin[ch], kStableCount);
+            s_measMid[ch] = MedianWin(s_measWin[ch], s_stableTarget);
         }
         for (int r = 0; r < s_runCount; r++) {
             uint8_t ch = s_runs[r].adCh;
             int src = s_runs[r].daCh;
             s_verify[ch][s_verifyIdx] = s_measMid[src];
-            bool settled = s_measMax[src] - s_measMin[src] <= (float)kStableCode;
+            bool settled = s_measMax[src] - s_measMin[src] <= (float)s_stableCode;
             char m[112];
             snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%.1f%s", (unsigned)s_verifyIdx, (unsigned)ch,
                      (unsigned)kGridLive[s_verifyIdx], (double)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");
@@ -1408,10 +1464,10 @@ void DoVerifySweep() {
     // PH_SETTLE：等 REF 建压后本地多次采样，取窗内 min/max 中值
     s_waitMs++;
     if (s_stableCount == 0) {
-        if (s_waitMs < (s_verifyIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
+        if (s_waitMs < (s_verifyIdx == 0 ? s_firstSettleMs : s_settleMs)) return;
         s_waitMs = 0;
         s_stableCount = 1;
-    } else if (s_waitMs < kSampleIntervalMs) {
+    } else if (s_waitMs < s_sampleIntervalMs) {
         return;
     } else {
         s_waitMs = 0;
@@ -1421,13 +1477,13 @@ void DoVerifySweep() {
         if (v < s_stableMin[ch]) s_stableMin[ch] = v;
         if (v > s_stableMax[ch]) s_stableMax[ch] = v;
     }
-    if (s_stableCount < kStableCount) {
+    if (s_stableCount < s_stableTarget) {
         s_stableCount++;
         return;
     }
     for (int r = 0; r < s_runCount; r++) {
         uint8_t ch = s_runs[r].adCh;
-        bool settled = s_stableMax[ch] - s_stableMin[ch] <= kStableCode;
+        bool settled = s_stableMax[ch] - s_stableMin[ch] <= s_stableCode;
         s_verify[ch][s_verifyIdx] = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
         char m[112];
         snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%.1f%s", (unsigned)s_verifyIdx, (unsigned)ch,
@@ -1439,7 +1495,7 @@ void DoVerifySweep() {
 #else
     // DA 方向：等本机 DA 建压 → 读 REF AD 攒窗
     s_waitMs++;
-    if (s_waitMs < (s_verifyIdx == 0 ? kFirstSettleMs : kSettleMs)) return;
+    if (s_waitMs < (s_verifyIdx == 0 ? s_firstSettleMs : s_settleMs)) return;
     s_waitMs = 0;
     s_stableCount = 0;
     s_awaitReply = false;
@@ -1469,20 +1525,20 @@ void DoVerify() {
         n += snprintf(msg + n, sizeof(msg) - n, "%s ch%d max=%.1f @set=%u rmse=%.1f", first ? "" : ";", ch, s_verMax[ch],
                       (unsigned)s_verMaxAt[ch], rmse);
         first = false;
-        if (s_verMax[ch] >= kCheckGateCode) pass = false;
+        if (s_verMax[ch] >= s_checkGate) pass = false;
     }
     LogInfo << msg;
 
     bool anyBad = false;
     for (int ch = 0; ch < 4; ch++) {
         if (!(s_chMask & (1u << ch))) continue;
-        if (s_verMax[ch] < kCheckGateCode) continue;
+        if (s_verMax[ch] < s_checkGate) continue;
         char ol[256];
-        int m = snprintf(ol, sizeof(ol), "calib: vfy ch%d |d|>=%d at:", ch, (int)kCheckGateCode);
+        int m = snprintf(ol, sizeof(ol), "calib: vfy ch%d |d|>=%d at:", ch, (int)s_checkGate);
         for (int i = 0; i < kGridN && m < (int)sizeof(ol) - 16; i++) {
             double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][i]) - (double)kGridLive[i];
             if (d < 0) d = -d;
-            if (d >= kCheckGateCode) m += snprintf(ol + m, sizeof(ol) - m, " %u(%.0f)", (unsigned)kGridLive[i], d);
+            if (d >= s_checkGate) m += snprintf(ol + m, sizeof(ol) - m, " %u(%.0f)", (unsigned)kGridLive[i], d);
         }
         LogInfo << ol;
         anyBad = true;
@@ -1581,13 +1637,13 @@ void FitAll() {
         snprintf(st, sizeof(st), "calib: ch%d resid max=%.1f @ideal=%u rmse=%.1f", ch, maxRes,
                  (unsigned)kGridLive[maxAt], sqrt(sumSq / kGridN));
         LogInfo << st;
-        if (maxRes > kResidualLimitCode) {
+        if (maxRes > s_residualLimit) {
             char rs[256];
-            int n = snprintf(rs, sizeof(rs), "calib: ch%d resid>%d at:", ch, (int)kResidualLimitCode);
+            int n = snprintf(rs, sizeof(rs), "calib: ch%d resid>%d at:", ch, (int)s_residualLimit);
             for (int i = 0; i < kGridN && n < (int)sizeof(rs) - 16; i++) {
                 double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
                 if (d < 0) d = -d;
-                if (d > kResidualLimitCode) {
+                if (d > s_residualLimit) {
                     n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGridLive[i], d);
                 }
             }
@@ -1633,6 +1689,13 @@ void DoSave() {
         char m[48];
         snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
         LogInfo << m;
+    }
+    if (s_skipVerify) {
+        LogInfo << "calib: verify skipped";
+        s_state = S_DONE;
+        PrintState();
+        LedSet(true);
+        return;
     }
     s_verifyIdx = 0;
     s_stableCount = -1;

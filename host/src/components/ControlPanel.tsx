@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CalibReport } from "../types";
+import type { CalibParamsCtl } from "../hooks/useCalibParams";
 import * as api from "../lib/ipc";
 import { Button, Card, CardTitle, Input, Pill, Segmented, Select } from "./ui";
 import { ChannelLinkMatrix } from "./ChannelLinkMatrix";
@@ -7,9 +8,10 @@ import { ChannelLinkMatrix } from "./ChannelLinkMatrix";
 interface Props {
   connected: boolean;
   report: CalibReport | null;
+  ctl: CalibParamsCtl;
 }
 
-export function ControlPanel({ connected, report }: Props) {
+export function ControlPanel({ connected, report, ctl }: Props) {
   const [enabled, setEnabled] = useState<boolean[]>([false, false, false, false]);
   const [daSel, setDaSel] = useState<number[]>([0, 0, 0, 0]);
   const [manualCh, setManualCh] = useState(0);
@@ -27,16 +29,20 @@ export function ControlPanel({ connected, report }: Props) {
     enabled.forEach((on, ch) => {
       if (on) mask |= 1 << ch;
     });
-    run(() => api.calibConfig(mask, daSel));
+    run(async () => {
+      await ctl.apply();
+      await api.calibConfig(mask, daSel);
+    });
   };
 
   const maskOf = () => enabled.reduce((m, on, ch) => (on ? m | (1 << ch) : m), 0);
 
-  // 启动/重启先下发当前选择，避免未点「配置」时沿用设备默认 mask=0x0F
+  // 启动/重启先下发参数与当前选择，避免未点「配置」时沿用设备默认 mask=0x0F
   const applyThen = (cmd: () => Promise<void>) => {
     const mask = maskOf();
     if (mask === 0) return;
     run(async () => {
+      await ctl.apply();
       await api.calibConfig(mask, daSel);
       await cmd();
     });
@@ -133,6 +139,9 @@ export function ControlPanel({ connected, report }: Props) {
         </span>
         <span className="text-ink-soft">
           当前 run：<span className="font-mono text-ink">{report?.run_ch ?? "—"}</span>
+        </span>
+        <span className="text-ink-soft">
+          复检：<span className="font-mono text-ink">{ctl.params.skip_verify ? "跳过" : "开启"}</span>
         </span>
         <span className="flex items-center gap-2">
           {channels.map((ch) => (

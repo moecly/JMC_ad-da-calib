@@ -4,5 +4,5 @@ V1.02    发行版和调试版
 V1.04    CMake编译
 V1.06    AD DA模块
 V1.07    DA模块相同值不修改，避免开关造成波动
-V1.09    校准：新增单板手动校准角色(CALIB_ROLE=MANUAL)、DUT对REF的信息查询、上位机连接恢复与卡片式界面
+V1.09    校准：新增单板手动校准角色(CALIB_ROLE=MANUAL)、DUT对REF的信息查询、上位机连接恢复与卡片式界面；门限与采样节拍改为运行时参数(OP_HOST_PARAMS)、复检可跳过(skip_verify)
 

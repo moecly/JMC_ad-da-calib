@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { CalibReport, LogLine, ProbeInfo, Snapshot, Status } from "../types";
+import type { CalibParams, CalibReport, LogLine, ProbeInfo, Snapshot, Status } from "../types";
 
 export const listProbes = () => invoke<ProbeInfo[]>("list_probes");
 export const connect = (probeIndex: number, chip: string) =>
@@ -21,6 +21,7 @@ export const manualSetDa = (ch: number, val: number, mode: number) =>
   invoke<void>("manual_set_da", { ch, val, mode });
 export const manualReadAd = (mode: number) => invoke<void>("manual_read_ad", { mode });
 export const calibStatus = () => invoke<void>("calib_status");
+export const calibParams = (p: CalibParams) => invoke<void>("calib_params", { p });
 export const calibVerify = (mask: number, refDa: number[]) =>
   invoke<void>("calib_verify", { mask, refDa });
 export const resetTarget = (runOnly = false) => invoke<void>("reset_target", { runOnly });
