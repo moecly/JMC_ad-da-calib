@@ -14,7 +14,7 @@ const CH_LABELS = ["ch0", "ch1", "ch2", "ch3"];
 const STEPS = ["flash_dut", "attach_calib", "run_calib", "flash_app", "attach_verify"] as const;
 
 const DEFAULT_PARAMS: CalibParams = {
-  residual_limit: 1000,
+  residual_limit: 100,
   check_gate: 16,
   stable_code: 20,
   settle_ms: 200,

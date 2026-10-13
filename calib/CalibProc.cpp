@@ -83,7 +83,7 @@ constexpr uint32_t kReplyTimeoutMs = 20;
 constexpr int kRetryMax = 3;
 constexpr uint32_t kPingIntervalMs = 100;
 constexpr int kPingMax = 20;
-constexpr double kDefResidualLimit = 1000.0;
+constexpr double kDefResidualLimit = 100.0;
 constexpr double kDefCheckGate = 16.0;
 
 // 运行时可调参数（OP_HOST_PARAMS 下发；复位回默认，不落 Flash）

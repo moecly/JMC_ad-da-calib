@@ -5,7 +5,7 @@ import * as api from "../lib/ipc";
 const STORAGE_KEY = "host.calibParams";
 
 export const DEFAULT_PARAMS: CalibParams = {
-  residual_limit: 1000,
+  residual_limit: 100,
   check_gate: 16,
   stable_code: 20,
   settle_ms: 200,

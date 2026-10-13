@@ -90,7 +90,7 @@ pub struct CalibParams {
 impl Default for CalibParams {
     fn default() -> Self {
         Self {
-            residual_limit: 1000,
+            residual_limit: 100,
             check_gate: 16,
             stable_code: 20,
             settle_ms: 200,
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(
             &f[2..19],
             &[
-                0x1A, 0xE8, 0x03, 0x10, 0x00, 0x14, 0x00, 0xC8, 0x00, 0x58, 0x02, 0x05, 0x00, 0x14, 0x00, 16, 0
+                0x1A, 0x64, 0x00, 0x10, 0x00, 0x14, 0x00, 0xC8, 0x00, 0x58, 0x02, 0x05, 0x00, 0x14, 0x00, 16, 0
             ]
         );
     }
