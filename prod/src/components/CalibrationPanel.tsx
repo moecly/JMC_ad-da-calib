@@ -23,7 +23,6 @@ const stepLabel = (step: string) =>
       flash_app: "烧录应用固件",
       attach_verify: "附着应用固件",
       done: "完成",
-      wait_next: "等待下一台",
     } as Record<string, string>
   )[step] ?? step;
 

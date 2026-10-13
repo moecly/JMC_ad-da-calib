@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use probe_rs::probe::list::Lister;
 use probe_rs::rtt::{Rtt, ScanRegion};
 use probe_rs::Permissions;
@@ -30,7 +30,6 @@ pub struct PipelineConfig {
     pub app_path: PathBuf,
     pub ch_mask: u8,
     pub ref_da: [u8; 4],
-    pub auto_next: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -59,7 +58,6 @@ impl Default for PipelineStatus {
 #[derive(Default)]
 pub struct PipelineShared {
     pub status: Mutex<PipelineStatus>,
-    pub next_gate: (Mutex<bool>, Condvar),
 }
 
 /// 启动校验日志是否通过：固件上电打印 `Device: <板型>, App Version: vX.Y` 与 `Init success`。
@@ -304,7 +302,7 @@ impl Drop for ActiveGuard {
 fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, shared: Arc<PipelineShared>) {
     let _active = ActiveGuard(shared.clone());
     shared.status.lock().running = true;
-    loop {
+    {
         if stop.load(Ordering::Relaxed) {
             set_status(&shared, "idle", None, "已停止");
             emit_status(&app, &shared);
@@ -326,7 +324,7 @@ fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, sha
             return;
         }
         set_status(&shared, "flash_dut", None, format!("烧录校准固件（约数十秒，请稍候）{}", cfg.dut_path.display()));
-        let _ = app.emit("prod://status", shared.status.lock().clone());
+        emit_status(&app, &shared);
         if let Err(e) = flash::flash_file(&mut session, &cfg.dut_path) {
             set_status(&shared, "flash_dut", Some(false), e);
             emit_status(&app, &shared);
@@ -381,7 +379,7 @@ fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, sha
             return;
         }
         set_status(&shared, "flash_app", None, format!("烧录应用固件（约数十秒，请稍候）{}", cfg.app_path.display()));
-        let _ = app.emit("prod://status", shared.status.lock().clone());
+        emit_status(&app, &shared);
         if let Err(e) = flash::flash_file(&mut session, &cfg.app_path) {
             set_status(&shared, "flash_app", Some(false), e);
             emit_status(&app, &shared);
@@ -419,27 +417,6 @@ fn pipeline_loop(app: AppHandle, cfg: PipelineConfig, stop: Arc<AtomicBool>, sha
         }
         emit_status(&app, &shared);
 
-        if !cfg.auto_next {
-            return;
-        }
-        // 连续多台：等待操作员换板后点「下一台」
-        set_status(&shared, "wait_next", Some(true), "本台 PASS，换板后点『下一台』继续");
-        emit_status(&app, &shared);
-        {
-            let mut gate = shared.next_gate.0.lock();
-            loop {
-                if *gate {
-                    *gate = false;
-                    break;
-                }
-                if stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                shared.next_gate.1.wait(&mut gate);
-            }
-        }
-        set_status(&shared, "idle", None, "开始下一台");
-        let _ = app.emit("prod://status", shared.status.lock().clone());
     }
 }
 

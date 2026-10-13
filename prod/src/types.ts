@@ -110,7 +110,6 @@ export interface PipelineConfig {
   app_path: string;
   ch_mask: number;
   ref_da: number[];
-  auto_next: boolean;
 }
 
 export interface PipelineStatus {

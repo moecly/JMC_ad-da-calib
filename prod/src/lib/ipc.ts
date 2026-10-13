@@ -11,7 +11,6 @@ export const getSnapshot = () => invoke<Snapshot>("get_snapshot");
 export const startPipeline = (cfg: PipelineConfig) =>
   invoke<void>("start_pipeline", { cfg });
 export const stopPipeline = () => invoke<void>("stop_pipeline");
-export const nextPipeline = () => invoke<void>("next_pipeline");
 export const getPipelineStatus = () => invoke<PipelineStatus>("get_pipeline_status");
 export const clearLog = () => invoke<void>("clear_log");
 

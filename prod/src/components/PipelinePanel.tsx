@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { PipelineConfig, PipelineStatus, ProbeInfo } from "../types";
 import * as api from "../lib/ipc";
-import { Button, Card, CardTitle, Field, Input, Pill, Select, Switch } from "./ui";
+import { Button, Card, CardTitle, Field, Input, Pill, Select } from "./ui";
 
 interface Props {
   probes: ProbeInfo[];
@@ -23,7 +23,6 @@ const stepLabel = (step: string) =>
       flash_app: "烧录应用固件",
       attach_verify: "附着应用固件",
       done: "完成",
-      wait_next: "等待下一台",
     } as Record<string, string>
   )[step] ?? step;
 
@@ -37,7 +36,6 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
   const [appPath, setAppPath] = useState(() => localStorage.getItem("prod.appPath") ?? "");
   const [chMask, setChMask] = useState(0x0f);
   const [refDa, setRefDa] = useState<string[]>(["0", "1", "2", "3"]);
-  const [autoNext, setAutoNext] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,7 +74,6 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
       app_path: appPath,
       ch_mask: chMask,
       ref_da: refDa.map((s) => Number(s)),
-      auto_next: autoNext,
     };
     try {
       await api.startPipeline(cfg);
@@ -99,19 +96,7 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
     }
   };
 
-  const next = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.nextPipeline();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const isNextStep = pipeline?.step === "wait_next";
+  const isDone = !!pipeline && !pipeline.running && pipeline.step !== "idle";
   const verifyPass = pipeline?.report?.verify_pass ?? null;
 
   return (
@@ -182,23 +167,15 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
               ))}
             </div>
           </Field>
-          <Field label="连续多台">
-            <Switch checked={autoNext} disabled={disabled} onChange={setAutoNext} label="自动进入下一台" />
-          </Field>
         </div>
 
         <div className="mt-3 flex items-center gap-2">
           <Button variant="primary" disabled={disabled} onClick={() => void start()}>
-            开始流程
+            {isDone ? "重新运行" : "开始流程"}
           </Button>
           <Button variant="danger" disabled={!running || busy} onClick={() => void stop()}>
             停止
           </Button>
-          {isNextStep && (
-            <Button variant="primary" onClick={() => void next()}>
-              下一台
-            </Button>
-          )}
           <Button size="sm" disabled={busy} onClick={() => void onRefreshProbes()}>
             刷新探针
           </Button>
@@ -236,7 +213,7 @@ export function PipelinePanel({ probes, pipeline, onRefreshProbes }: Props) {
 }
 
 function StepBar({ step, ok }: { step: string; ok: boolean | null }) {
-  const finished = step === "done" || step === "wait_next";
+  const finished = step === "done";
   const cur = finished ? STEPS.length : (STEPS as readonly string[]).indexOf(step);
   return (
     <div className="flex items-center gap-2 rounded-lg bg-canvas p-3 text-xs">

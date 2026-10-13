@@ -20,5 +20,14 @@ pub fn flash_file(session: &mut probe_rs::Session, path: &Path) -> Result<(), St
         "hex" => download_file_with_options(session, path, HexLoader, options),
         _ => download_file_with_options(session, path, ElfLoader(ElfOptions::default()), options),
     };
-    result.map_err(|e| format!("烧录失败: {e}"))
+    result.map_err(|e| {
+        // FileDownloadError::Flash 的 Display 是固定文案，真实 FlashError 只挂在 source 链上，须展开才可定位
+        let mut msg = format!("烧录失败: {e}");
+        let mut source = std::error::Error::source(&e);
+        while let Some(s) = source {
+            msg.push_str(&format!(" → {s}"));
+            source = s.source();
+        }
+        msg
+    })
 }

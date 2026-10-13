@@ -214,22 +214,6 @@ fn get_pipeline_status(state: State<AppState>) -> PipelineStatus {
     state.shared.status.lock().clone()
 }
 
-/// 「下一台」：唤醒连续模式中停在 `wait_next` 的线程，继续下一台流水。
-#[tauri::command]
-fn next_pipeline(state: State<AppState>) -> Result<(), String> {
-    let shared = state.shared.clone();
-    let status = shared.status.lock().clone();
-    if status.step != "wait_next" {
-        return Err("当前不在『等待下一台』状态".to_string());
-    }
-    {
-        let mut gate = shared.next_gate.0.lock();
-        *gate = true;
-    }
-    shared.next_gate.1.notify_one();
-    Ok(())
-}
-
 #[tauri::command]
 fn clear_log(app: AppHandle, state: State<AppState>) {
     let mut status = state.shared.status.lock();
@@ -251,7 +235,6 @@ pub fn run() {
             get_snapshot,
             start_pipeline,
             stop_pipeline,
-            next_pipeline,
             get_pipeline_status,
             clear_log
         ])
