@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --color-canvas: #f5f5f7;
+  --color-panel: #ffffff;
+  --color-sidebar: #f2f2f4;
+  --color-field: #f5f5f7;
+
+  --color-ink: #1d1d1f;
+  --color-ink-soft: #6e6e73;
+  --color-ink-faint: #86868b;
+
+  --color-line: #e5e5ea;
+  --color-line-strong: #d2d2d7;
+
+  --color-accent: #007aff;
+  --color-accent-strong: #0060df;
+  --color-accent-soft: #eaf3ff;
+
+  --color-ok: #34c759;
+  --color-ok-soft: #e6f7ec;
+  --color-ok-ink: #1a7f3c;
+
+  --color-warn: #ff9f0a;
+  --color-warn-soft: #fff4e5;
+  --color-warn-ink: #97600a;
+
+  --color-danger: #ff3b30;
+  --color-danger-soft: #fdecea;
+  --color-danger-ink: #c0392b;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+}
+
+:root { color-scheme: light; }
+
+/* 原生 select 的下拉列表由 WebKitGTK 按 color-scheme 绘制；:root 有时不覆盖，
+   这里在控件本身再声明一次并显式给 option 上色，避免深色系统主题下弹层变黑 */
+select { color-scheme: light; }
+select option {
+  background-color: var(--color-panel);
+  color: var(--color-ink);
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #c9c9ce;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #adadb2; background-clip: content-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

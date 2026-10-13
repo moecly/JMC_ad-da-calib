@@ -84,3 +84,24 @@ host-build:
 host-test:
     cd host && nix develop --command cargo test --manifest-path src-tauri/Cargo.toml
 
+# 产线烧录校准上位机（prod/，Tauri）：先 git add prod/ 让嵌套 flake 可见，再进 prod 的 nix shell
+# 安装前端依赖
+prod-install:
+    cd prod && nix develop --command npm install
+
+# 启动桌面应用（自动化流水：烧录 DUT → 自动校准 → 复检 PASS 烧 APP → 校验启动日志）
+prod:
+    cd prod && nix develop --command npm run tauri dev
+
+# 前端构建（tsc + vite）
+prod-build:
+    cd prod && nix develop --command npm run build
+
+# 后端构建
+prod-build-backend:
+    cd prod && nix develop --command cargo build --manifest-path src-tauri/Cargo.toml
+
+# 纯函数单测（无需硬件；verify_log_pass / calib_pass 等）
+prod-test:
+    cd prod && nix develop --command cargo test --manifest-path src-tauri/Cargo.toml
+
