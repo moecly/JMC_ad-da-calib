@@ -20,13 +20,16 @@ export function ConnectionBar({ probes, status, probeName, onRefresh }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const connected = status.connected;
+  // 工作线程存续期间（连接中/搜索中）后端 conn 已被占用：此时若仍显示「连接」，点击只会撞上
+  // 后端的「已连接」错误，而且没有任何办法中止搜索；按钮必须反映「有会话」这一事实
+  const session = connected || status.state === "connecting" || status.state === "searching";
   const showTargetCtl = status.state !== "disconnected" || connected;
 
   const toggle = async () => {
     setBusy(true);
     setError(null);
     try {
-      if (connected) {
+      if (session) {
         // Rust 侧 disconnect 有界返回；此处再兜底一层，避免按钮永久 busy
         await Promise.race([api.disconnect(), timeout(5000)]);
       } else {
@@ -89,10 +92,10 @@ export function ConnectionBar({ probes, status, probeName, onRefresh }: Props) {
         <Button
           variant="primary"
           size="sm"
-          disabled={busy || (!connected && probes.length === 0)}
+          disabled={busy || (!session && probes.length === 0)}
           onClick={() => void toggle()}
         >
-          {connected ? "断开" : "连接"}
+          {session ? "断开" : "连接"}
         </Button>
       </div>
       {status.hint && (

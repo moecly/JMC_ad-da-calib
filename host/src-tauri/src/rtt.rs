@@ -17,6 +17,7 @@ use crate::calib::Parser;
 pub const MAX_LINES: usize = 5000;
 const PENDING_MAX: usize = 4096;
 const ATTACH_MAX_TRIES: u32 = 40;
+const PROBE_LOST_HINT: &str = "重新插好 J-Link 后点『连接』重建会话（拔插时会话已释放，不会占用探针）";
 // 控制块只在固件 startup 由 .data 拷贝写进 SRAM：目标若被停机在复位态，SRAM 里没有
 // "SEGGER RTT" 魔数，单纯重扫永远不会成功，必须周期性强制复位并运行让固件重建控制块
 const AUTO_RESET_AFTER: u32 = 3;
@@ -145,6 +146,13 @@ pub(crate) fn process_line(
     }
 }
 
+/// 探针掉线（拔 J-Link）时 probe-rs 的 RTT 扫描会把内存读错误当成「没找到控制块」
+/// （`rtt::find_control_block` 内 `core.read(..).ok()?`），错误一律是 ControlBlockNotFound，
+/// 与「目标没跑到 RTT 初始化」无法从错误类型区分；只能另发一次真实内存访问来判定探针是否还在
+fn probe_io_error(core: &mut probe_rs::Core<'_>) -> Option<String> {
+    core.status().err().map(|e| e.to_string())
+}
+
 fn worker_loop(
     app: AppHandle,
     stop: Arc<AtomicBool>,
@@ -243,17 +251,47 @@ fn worker_loop(
         let mut rtt = match rtt {
             Ok(r) => r,
             Err(e) => {
+                if let Some(pe) = probe_io_error(&mut core) {
+                    emit_status(
+                        &app,
+                        &status,
+                        mkstatus(
+                            false,
+                            "error",
+                            format!("探针通信中断（J-Link 已断开？）: {pe}"),
+                            Some(PROBE_LOST_HINT.to_string()),
+                            tries,
+                        ),
+                    );
+                    // 必须退出线程：否则 conn 一直持有死会话，界面显示「连接」而点击回「已连接」
+                    return;
+                }
                 tries += 1;
                 if tries == AUTO_RESET_AFTER || (tries > AUTO_RESET_AFTER && tries % 10 == 0) {
                     let _ = core.reset();
                 }
-                let state = if tries >= ATTACH_MAX_TRIES { "error" } else { "searching" };
+                if tries >= ATTACH_MAX_TRIES {
+                    emit_status(
+                        &app,
+                        &status,
+                        mkstatus(
+                            false,
+                            "error",
+                            format!("未找到 RTT 控制块（已重试 {ATTACH_MAX_TRIES} 次仍失败，已停止）: {e}"),
+                            // 会话已释放，『复位并运行』不可用；重连会自动复位运行
+                            Some("点『连接』重开会话会自动复位运行；仍失败则给板子断电重上电".to_string()),
+                            tries,
+                        ),
+                    );
+                    // 同上：停手并释放会话，否则「连接」按钮永远点不动
+                    return;
+                }
                 emit_status(
                     &app,
                     &status,
                     mkstatus(
                         false,
-                        state,
+                        "searching",
                         format!("未找到 RTT 控制块（第 {tries} 次）: {e}"),
                         Some(hint_for(&e)),
                         tries,

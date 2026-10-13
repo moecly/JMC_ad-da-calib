@@ -204,6 +204,12 @@ fn attach_rtt(
         match rtt {
             Ok(r) => return Ok(r),
             Err(e) => {
+                // 探针掉线时 probe-rs 扫描会把内存读错误吞成 ControlBlockNotFound
+                // （`rtt::find_control_block` 内 `core.read(..).ok()?`），与「目标没跑到 RTT 初始化」
+                // 无法从错误类型区分；另发一次真实内存访问判定探针是否还在
+                if let Err(pe) = core.status() {
+                    return Err(format!("探针通信中断（J-Link 已断开？）: {pe}；重新插好 J-Link 后重新运行流程"));
+                }
                 tries += 1;
                 if tries == AUTO_RESET_AFTER || (tries > AUTO_RESET_AFTER && tries % 10 == 0) {
                     let _ = core.reset();
