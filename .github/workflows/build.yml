@@ -20,13 +20,10 @@ env:
   BUILD_TYPES: Debug Release
 
 jobs:
-  build:
-    name: build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  # 固件是交叉编译产物，与构建主机平台无关：单平台构建一次，出一个 zip
+  firmware:
+    name: firmware
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -36,20 +33,13 @@ jobs:
           release: '14.2.Rel1'
 
       - name: Ensure Ninja
-        shell: bash
         run: |
-          if ! command -v ninja >/dev/null 2>&1; then
-            case "${RUNNER_OS}" in
-              Linux)   sudo apt-get update && sudo apt-get install -y ninja-build ;;
-              macOS)   brew install ninja ;;
-              Windows) choco install ninja -y --no-progress ;;
-            esac
-          fi
+          command -v ninja >/dev/null 2>&1 || {
+            sudo apt-get update && sudo apt-get install -y ninja-build
+          }
           ninja --version
-          cmake --version
 
       - name: Configure & build all boards x roles x build types
-        shell: bash
         run: |
           set -euo pipefail
           for b in ${BOARDS}; do
@@ -65,50 +55,117 @@ jobs:
             done
           done
 
-      - name: Collect artifacts
-        shell: bash
+      - name: Package firmware zip
         run: |
           set -euo pipefail
+          major=$(sed -n 's/^set(MAJOR \([0-9]\+\))/\1/p' CMakeLists.txt)
+          minor=$(sed -n 's/^set(MINOR \([0-9]\+\))/\1/p' CMakeLists.txt)
+          ver="v${major}.${minor}"
           mkdir -p dist
           find build -maxdepth 3 -type f \
             \( -name '*.elf' -o -name '*.hex' -o -name '*.map' \) \
             -exec cp {} dist/ \;
           ls -l dist
+          (cd dist && zip -r "../firmware-${ver}.zip" .)
+          sha256sum "firmware-${ver}.zip" > "firmware-${ver}.zip.sha256"
+          ls -l firmware-*.zip*
 
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ matrix.os }}
-          path: dist/*
+          name: firmware
+          path: |
+            firmware-*.zip
+            firmware-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  # 桌面上位机是原生程序，按平台各出一套安装包
+  desktop:
+    name: desktop (${{ matrix.os }} / ${{ matrix.app }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        app: [host, prod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libudev-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.app }}/src-tauri
+
+      # probe-rs 走 nusb（纯 Rust），无需 libusb；hidapi 在 Linux 需要 libudev（已装）
+      - name: Install frontend dependencies
+        working-directory: ${{ matrix.app }}
+        run: npm ci
+
+      - name: Build Tauri bundles
+        working-directory: ${{ matrix.app }}
+        run: npm run tauri build
+
+      - name: List bundles
+        shell: bash
+        working-directory: ${{ matrix.app }}/src-tauri/target/release/bundle
+        run: find . -maxdepth 2 -type f | sort
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}-${{ matrix.app }}
+          path: |
+            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.deb
+            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.rpm
+            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.AppImage
+            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.dmg
+            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.msi
+            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*-setup.exe
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [firmware, desktop]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Package per-OS archives
-        shell: bash
+      # 重打同一 tag 时先清掉旧 Release（含陈旧附件），否则会留下上次的错误产物
+      - name: Remove stale release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "${GITHUB_REF_NAME}" --yes --cleanup-tag=false || true
+
+      - name: Collect assets
         run: |
           set -euo pipefail
-          major=$(sed -n 's/^set(MAJOR \([0-9]\+\))/\1/p' CMakeLists.txt)
-          minor=$(sed -n 's/^set(MINOR \([0-9]\+\))/\1/p' CMakeLists.txt)
-          ver="v${major}.${minor}"
-          echo "version=${ver}"
           mkdir -p out
-          for d in artifacts/firmware-*; do
-            os="${d#artifacts/firmware-}"
-            (cd "$d" && zip -r "../../out/firmware-${ver}-${os}.zip" .)
-          done
+          find artifacts -type f \
+            \( -name '*.zip' -o -name '*.sha256' -o -name '*.deb' -o -name '*.rpm' \
+               -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            -exec cp {} out/ \;
           ls -l out
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: out/*.zip
+          files: out/*
+          generate_release_notes: true

@@ -63,7 +63,7 @@ TMR1 1ms 中断 → InterruptCallback → AppOneMsTask() → Application::OneMsT
 | `ldscripts/` | 链接脚本（含 `_Min_Heap_Size=0x3000`、`_Min_Stack_Size=0x400`） |
 | `SVD/` | `AT32F425xx_v2.svd`，调试器寄存器视图 |
 | `build/` | CMake 产物（已 gitignore） |
-| `.github/workflows/build.yml` | GitHub Actions：多平台（ubuntu/macos/windows）编译全部 板型×角色×类型 并上传 ELF/HEX/MAP；打 tag 出 Release zip。不参与固件编译 |
+| `.github/workflows/build.yml` | GitHub Actions：固件 job（ubuntu，交叉编译全部 板型×角色×类型，打包成单个 `firmware-v<ver>.zip`）+ 桌面 job（matrix ubuntu/macos/windows × `host`/`prod`，`npm run tauri build` 出 deb/rpm/AppImage/dmg/msi/nsis）+ release job（`v*` tag 时先删同名旧 Release 再汇总上传）。不参与固件编译 |
 
 ## Development Commands
 
@@ -230,7 +230,7 @@ cd prod && nix develop --command cargo test --manifest-path src-tauri/Cargo.toml
 
 ## Testing & QA
 
-- **无测试框架、无宿主可运行目标**。不存在 `test/` 目录、Unity/CppUTest/gtest。CI 仅做构建打包：`.github/workflows/build.yml` 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个 runner 上编译全部 板型×角色×构建类型（`BOARD∈{AD_4CH,DA_4CH}` × `CALIB_ROLE∈{APP,REF,DUT,MANUAL}` × `Debug/Release`）并上传 ELF/HEX/MAP；打 `v*` tag 时汇总成 `firmware-v<MAJOR>.<MINOR>-<os>.zip` 附到 GitHub Release。工具链经 `carlosperate/arm-none-eabi-gcc-action` 安装（固定 `14.2.Rel1`）。无 `.gitlab-ci.yml`、`Jenkinsfile`。
+- **无测试框架、无宿主可运行目标**。不存在 `test/` 目录、Unity/CppUTest/gtest。CI（`.github/workflows/build.yml`）三个 job：`firmware`（ubuntu 单平台，编译全部 `BOARD∈{AD_4CH,DA_4CH}` × `CALIB_ROLE∈{APP,REF,DUT,MANUAL}` × `Debug/Release`，打包成单个 `firmware-v<MAJOR>.<MINOR>.zip`——固件是 `arm-none-eabi-` 交叉编译产物，与构建主机平台无关，故不分平台；工具链 `carlosperate/arm-none-eabi-gcc-action` 固定 `14.2.Rel1`）；`desktop`（matrix `ubuntu/macos/windows` × `host`/`prod`，`npm ci` + `npm run tauri build`，出各平台原生安装包）；`release`（仅 `v*` tag，先用 `gh release delete` 清掉同名旧 Release 再汇总上传，保证重打 tag 不留陈旧附件）。无 `.gitlab-ci.yml`、`Jenkinsfile`。桌面 job 未在本地验证过（需 webkit2gtk 等系统依赖与完整 Rust/node 构建），以 GitHub runner 实际结果为准。
 - 唯一的质量门是构建成功 + 静态检查配置（`.clang-tidy` 已配置但未接入自动化流水线；`cppcheck` 无配置）。
 - 验证手段只能是硬件在环：`cmake --build build` → `just run <elf>` → 通过 USART4 日志（`LogInfo`/`LogTrace`）与 SWD 调试观察行为。改动驱动/标定/定时逻辑后，必须说明需要哪块板卡验证。
 - AD 标定实测（AD_4CH=DUT, DA_4CH=REF）：**残差与 AD/DA 通道对应关系直接相关**，实测证据如下。
