@@ -2,40 +2,55 @@ chip := "at32f425k8t7"
 speed := "10000"
 toolchain := "cmake/gcc.cmake"
 
-# 配置：just configure <BOARD> [ROLE] [BUILD_TYPE]
-# 每块板/角色用独立 build 目录，避免 CMake cache 冲突
-configure board role="APP" type="Debug":
+# 板型（以 Board/ 实际目录为准）
+BOARDS := "AD_4CH DA_4CH"
+# 校准角色；APP 固件不在本仓库本地脚本编译
+ROLES := "REF DUT MANUAL"
+TYPES := "Debug Release"
+
+# 配置单个组合：just configure <BOARD> <ROLE> [TYPE]
+# 目录 build/<BOARD>_<ROLE>_<TYPE>
+configure board role type="Debug":
     cmake -DBOARD={{board}} -DCALIB_ROLE={{role}} -DBUILD_TYPE={{type}} \
-          -DCMAKE_TOOLCHAIN_FILE={{toolchain}} -G Ninja -B build/{{board}}-{{role}}
+          -DCMAKE_TOOLCHAIN_FILE={{toolchain}} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G Ninja \
+          -S . -B "build/{{board}}_{{role}}_{{type}}"
 
-# 构建：just build <BOARD> [ROLE] [BUILD_TYPE]
-build board role="APP" type="Debug":
-    cmake --build build/{{board}}-{{role}}
+# 并发配置所有 板型 × 角色 × 类型（Debug / Release 一起）
+configure_all:
+    @for t in {{TYPES}}; do \
+        for r in {{ROLES}}; do \
+            for b in {{BOARDS}}; do \
+                cmake -DBOARD=$b -DCALIB_ROLE=$r -DBUILD_TYPE=$t \
+                    -DCMAKE_TOOLCHAIN_FILE={{toolchain}} \
+                    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G Ninja -S . \
+                    -B "build/${b}_${r}_${t}" & \
+            done; \
+        done; \
+    done; wait
 
-# 配置并构建：just make <BOARD> [ROLE] [BUILD_TYPE]
-make board role="APP" type="Debug":
+# 并发构建 build/ 下所有已配置目录
+build:
+    for d in build/*/; do \
+        [ -f "$d/build.ninja" ] && cmake --build "$d" & \
+    done; wait
+
+# 全量：并发配置 + 并发构建
+all: configure_all build
+
+# 配置并构建单个组合：just make <BOARD> <ROLE> [TYPE]
+make board role type="Debug":
     just configure {{board}} {{role}} {{type}}
-    just build {{board}} {{role}} {{type}}
+    cmake --build "build/{{board}}_{{role}}_{{type}}"
 
 # 一次配好本轮调试用的两块板
 ref_and_dut:
     just make DA_4CH REF
     just make AD_4CH DUT
 
-# 全部板型 × 全部角色一起编译（Debug；每组合独立 build 目录）
-all:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for b in DA_4CH AD_4CH; do
-      for r in APP REF DUT MANUAL; do
-        echo "== $b $r"
-        just make "$b" "$r"
-      done
-    done
+clean:
+    rm -rf build
 
-# 清理某块板的构建目录
-clean board role="APP":
-    rm -rf build/{{board}}-{{role}}
+clean_rebuild: clean all
 
 download_and_reset elf:
     just download {{elf}} && just reset
@@ -64,8 +79,8 @@ reset:
 info:
     probe-rs info --chip {{chip}}
 
-watch board role="APP":
-    watchexec -e c,h,cpp,hpp,ld 'cmake --build build/{{board}}-{{role}}'
+watch board role type="Debug":
+    watchexec -e c,h,cpp,hpp,ld 'cmake --build build/{{board}}_{{role}}_{{type}}'
 
 # 上位机（host/，Tauri）：先 git add host/ 让嵌套 flake 可见，再进 host 的 nix shell
 # 安装前端依赖

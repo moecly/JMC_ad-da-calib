@@ -121,8 +121,10 @@ just download build/DA_4CH-Debug-v1.8.elf   # 仅烧录
 just run      build/DA_4CH-Debug-v1.8.elf   # 烧录并运行，日志经 RTT 打在终端（无需串口）
 just attach   build/DA_4CH-Debug-v1.8.elf   # 不下载，仅连上看 RTT 日志
 just erase | reset | info
-just all                                     # 全部板型 × 角色（Debug）一起编译
-just watch                                   # watchexec 增量重建
+just all                                     # 全部板型 × 角色 × 类型 并发配置 + 构建
+just configure_all | build                   # 仅并发配置 / 仅并发构建
+just make AD_4CH DUT Debug                   # 配置并构建单个组合
+just watch AD_4CH DUT Debug                  # watchexec 增量重建
 ```
 
 上位机（`host/`，独立于固件工具链，自带 `flake.nix`）：
@@ -215,7 +217,7 @@ cd prod && nix develop --command cargo test --manifest-path src-tauri/Cargo.toml
 | `user/BaseTimer.{h,cpp}` / `user/Timer/Timer.h` | 硬件定时器抽象 |
 | `include/at32f425_conf.h` | 外设/中断裁剪开关 |
 | `ldscripts/AT32F425x8_FLASH.ld` | 内存布局与堆栈下限 |
-| `justfile` | 烧录/复位/监视命令 |
+| `justfile` | 编译/构建（`all`/`configure_all`/`build`/`make <BOARD> <ROLE> [TYPE]`，目录 `build/<BOARD>_<ROLE>_<TYPE>`，并发）+ 烧录/复位/监视 + `host-*`/`prod-*` 任务 |
 
 ## Runtime/Tooling Preferences
 
