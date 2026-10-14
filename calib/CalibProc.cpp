@@ -75,7 +75,8 @@ constexpr uint32_t kDefFirstSettleMs = CALIB_FIRST_SETTLE_MS;
 constexpr uint32_t kDefFirstSettleMs = 600;
 #endif
 // 稳定判据：DA 建压等待后采 s_stableTarget 次，窗内极差 > s_stableCode 只打 unstable 标记，不中断
-constexpr uint32_t kDefSampleIntervalMs = 5;
+// 本地采样窗须跨越 AD7689 的 128 ms 均值滤波长度（s_stableTarget × s_sampleIntervalMs > 128）
+constexpr uint32_t kDefSampleIntervalMs = 20;
 constexpr int kDefStableCount = 16;
 constexpr int kDefStableCode = 20;
 constexpr int kWindowMax = 32;  // s_measWin 的固定上限，stable_count 运行时取值 1..kWindowMax
@@ -146,6 +147,7 @@ static inline float MedianWin(float* v, int n) {
         }
         v[j + 1] = key;
     }
+    if (n < 2) return v[0];  // stable_count 允许为 1
     return 0.5f * (v[n / 2 - 1] + v[n / 2]);
 }
 // AD 方向并行：本点需驱动的 REF DA 通道去重列表与已收 ACK 数
@@ -360,7 +362,6 @@ int s_samplingCh = -1;
 uint16_t s_samplingIdeal = 0;
 uint32_t s_mWaitMs;
 int s_mStable;
-uint16_t s_mMin, s_mMax;
 
 // x/y 方向已按板型写入 s_mx/s_my，故 PolyFit 与残差公式对两种板型同一套：
 //   AD: x=raw  y=ideal → coeff 语义 ideal=f(raw) 对齐 CalibAdIdeal
@@ -562,8 +563,6 @@ void HandleManual(const uint8_t* p, uint8_t len) {
                     s_samplingIdeal = ideal;
                     s_mWaitMs = 0;
                     s_mStable = 0;
-                    s_mMin = 0xFFFF;
-                    s_mMax = 0;
                 } else {
                     int n = s_manualN[ch];
                     s_mx[ch][n] = ideal;
@@ -678,7 +677,7 @@ void HostPoll() {
 }
 
 // AD 采点：与 DoSweep 的 PH_SETTLE 同节奏——先等 s_settleMs，再每 s_sampleIntervalMs 采 s_stableTarget 次，
-// 取窗内 (min+max)/2
+// 取窗内中值
 void ManualTick() {
     HostPoll();
 #if defined(CONFIG_DEVICE_AD_4CH)
@@ -694,13 +693,12 @@ void ManualTick() {
         s_mWaitMs = 0;
     }
     uint16_t v = Bd().CalibAdRaw((uint8_t)s_samplingCh);
-    if (v < s_mMin) s_mMin = v;
-    if (v > s_mMax) s_mMax = v;
+    s_measWin[0][s_mStable - 1] = (float)v;  // 首个样本时 s_mStable 已是 1
     if (s_mStable < s_stableTarget) {
         s_mStable++;
         return;
     }
-    uint16_t median = (uint16_t)((s_mMin + s_mMax) / 2);
+    uint16_t median = (uint16_t)MedianWin(s_measWin[0], s_stableTarget);
     int ch = s_samplingCh;
     int n = s_manualN[ch];
     s_mx[ch][n] = median;
@@ -1265,6 +1263,7 @@ void DoSweep() {
         }
         for (int ch = 0; ch < 4; ch++) {
             uint16_t v = Bd().CalibAdRaw((uint8_t)ch);
+            s_measWin[ch][s_stableCount - 1] = (float)v;  // 首个样本时 s_stableCount 已是 1
             if (v < s_stableMin[ch]) s_stableMin[ch] = v;
             if (v > s_stableMax[ch]) s_stableMax[ch] = v;
         }
@@ -1278,7 +1277,7 @@ void DoSweep() {
         }
         for (int r = 0; r < s_runCount; r++) {
             uint8_t ch = s_runs[r].adCh;
-            float mid = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
+            float mid = MedianWin(s_measWin[ch], s_stableTarget);
             s_samples[ch][s_sweepIdx] = mid;
             char m[112];
             snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
@@ -1467,7 +1466,7 @@ void DoVerifySweep() {
     }
 
 #if defined(CONFIG_DEVICE_AD_4CH)
-    // PH_SETTLE：等 REF 建压后本地多次采样，取窗内 min/max 中值
+    // PH_SETTLE：等 REF 建压后本地多次采样，取窗内中值
     s_waitMs++;
     if (s_stableCount == 0) {
         if (s_waitMs < (s_verifyIdx == 0 ? s_firstSettleMs : s_settleMs)) return;
@@ -1480,6 +1479,7 @@ void DoVerifySweep() {
     }
     for (int ch = 0; ch < 4; ch++) {
         uint16_t v = Bd().CalibAdRaw((uint8_t)ch);
+        s_measWin[ch][s_stableCount - 1] = (float)v;  // 首个样本时 s_stableCount 已是 1
         if (v < s_stableMin[ch]) s_stableMin[ch] = v;
         if (v > s_stableMax[ch]) s_stableMax[ch] = v;
     }
@@ -1490,7 +1490,7 @@ void DoVerifySweep() {
     for (int r = 0; r < s_runCount; r++) {
         uint8_t ch = s_runs[r].adCh;
         bool settled = s_stableMax[ch] - s_stableMin[ch] <= s_stableCode;
-        s_verify[ch][s_verifyIdx] = 0.5f * ((float)s_stableMin[ch] + (float)s_stableMax[ch]);
+        s_verify[ch][s_verifyIdx] = MedianWin(s_measWin[ch], s_stableTarget);
         char m[112];
         snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%.1f%s", (unsigned)s_verifyIdx, (unsigned)ch,
                  (unsigned)kGridLive[s_verifyIdx], (double)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");

@@ -19,7 +19,7 @@ const DEFAULT_PARAMS: CalibParams = {
   stable_code: 20,
   settle_ms: 200,
   first_settle_ms: 600,
-  sample_interval_ms: 5,
+  sample_interval_ms: 20,
   ref_sample_interval_ms: 20,
   stable_count: 16,
   skip_verify: false,
