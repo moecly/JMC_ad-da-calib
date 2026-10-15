@@ -100,7 +100,7 @@ export function OverviewTab({
 
           <div className="mt-3">
             <div className="mb-1 text-xs text-ink-faint">通道系数（c0..c3）</div>
-            <table className="w-full text-[13px]">
+            <table className="w-full text-[13px] whitespace-nowrap">
               <tbody>
                 {(report?.channels ?? []).map((ch) => (
                   <tr key={ch.ch}>

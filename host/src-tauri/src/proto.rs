@@ -85,12 +85,13 @@ pub struct CalibParams {
     pub ref_sample_interval_ms: u16,
     pub stable_count: u8,
     pub skip_verify: bool,
+    pub retry: u8,
 }
 
 impl Default for CalibParams {
     fn default() -> Self {
         Self {
-            residual_limit: 100,
+            residual_limit: 20,
             check_gate: 16,
             stable_code: 20,
             settle_ms: 200,
@@ -99,12 +100,13 @@ impl Default for CalibParams {
             ref_sample_interval_ms: 20,
             stable_count: 16,
             skip_verify: false,
+            retry: 3,
         }
     }
 }
 
 pub fn params(p: &CalibParams) -> Vec<u8> {
-    let mut body = Vec::with_capacity(17);
+    let mut body = Vec::with_capacity(18);
     body.push(OP_HOST_PARAMS);
     body.extend_from_slice(&p.residual_limit.to_le_bytes());
     body.extend_from_slice(&p.check_gate.to_le_bytes());
@@ -115,6 +117,7 @@ pub fn params(p: &CalibParams) -> Vec<u8> {
     body.extend_from_slice(&p.ref_sample_interval_ms.to_le_bytes());
     body.push(p.stable_count);
     body.push(u8::from(p.skip_verify));
+    body.push(p.retry);
     frame(&body)
 }
 
@@ -172,12 +175,12 @@ mod tests {
     fn params_frame_layout() {
         let f = params(&CalibParams::default());
         assert_eq!(f[0], 0xA5);
-        assert_eq!(f[1], 17);
-        assert_eq!(f.len(), 23);
+        assert_eq!(f[1], 18);
+        assert_eq!(f.len(), 24);
         assert_eq!(
-            &f[2..19],
+            &f[2..20],
             &[
-                0x1A, 0x64, 0x00, 0x10, 0x00, 0x14, 0x00, 0xC8, 0x00, 0x58, 0x02, 0x05, 0x00, 0x14, 0x00, 16, 0
+                0x1A, 0x14, 0x00, 0x10, 0x00, 0x14, 0x00, 0xC8, 0x00, 0x58, 0x02, 0x14, 0x00, 0x14, 0x00, 16, 0, 3
             ]
         );
     }

@@ -14,7 +14,7 @@ const CH_LABELS = ["ch0", "ch1", "ch2", "ch3"];
 const STEPS = ["flash_dut", "attach_calib", "run_calib", "flash_app", "attach_verify"] as const;
 
 const DEFAULT_PARAMS: CalibParams = {
-  residual_limit: 100,
+  residual_limit: 20,
   check_gate: 16,
   stable_code: 20,
   settle_ms: 200,
@@ -23,6 +23,7 @@ const DEFAULT_PARAMS: CalibParams = {
   ref_sample_interval_ms: 20,
   stable_count: 16,
   skip_verify: false,
+  retry: 3,
 };
 
 const NUM_FIELDS: Array<{ key: keyof CalibParams; label: string; min: number; max: number }> = [
@@ -34,6 +35,7 @@ const NUM_FIELDS: Array<{ key: keyof CalibParams; label: string; min: number; ma
   { key: "sample_interval_ms", label: "AD 采样间隔 (ms)", min: 1, max: 65535 },
   { key: "ref_sample_interval_ms", label: "DA 采样间隔 (ms)", min: 1, max: 65535 },
   { key: "stable_count", label: "采样次数", min: 1, max: 32 },
+  { key: "retry", label: "重试次数", min: 1, max: 9 },
 ];
 
 function loadParams(): CalibParams {

@@ -45,7 +45,7 @@ export function CalibResult({ report }: Props) {
       </CardTitle>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-[13px]">
+        <table className="w-full text-[13px] whitespace-nowrap">
           <thead className="text-xs text-ink-faint">
             <tr>
               <th className="px-3 py-2 text-left font-medium whitespace-nowrap">通道</th>
@@ -66,7 +66,7 @@ export function CalibResult({ report }: Props) {
                 <td className="px-3 py-2 font-mono tabular-nums">{stat(ch.before)}</td>
                 <td className="px-3 py-2 font-mono tabular-nums">{stat(ch.resid)}</td>
                 <td className="px-3 py-2 font-mono tabular-nums">{stat(ch.verify)}</td>
-                <td className="px-3 py-2 font-mono text-ink-soft">
+                <td className="px-3 py-2 font-mono whitespace-nowrap text-ink-soft">
                   {ch.coeff ? ch.coeff.map((c) => num(c, 6)).join(", ") : "—"}
                 </td>
               </tr>

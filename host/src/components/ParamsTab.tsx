@@ -17,6 +17,7 @@ const NUM_FIELDS: Array<{ key: keyof CalibParams; label: string; min: number; ma
   { key: "sample_interval_ms", label: "AD 采样间隔 (ms)", min: 1, max: 65535 },
   { key: "ref_sample_interval_ms", label: "DA 采样间隔 (ms)", min: 1, max: 65535 },
   { key: "stable_count", label: "采样次数", min: 1, max: 32 },
+  { key: "retry", label: "重试次数", min: 1, max: 9 },
 ];
 
 export function ParamsTab({ connected, report, ctl }: Props) {
@@ -84,6 +85,7 @@ export function ParamsTab({ connected, report, ctl }: Props) {
             <span>DA 间隔 {fw.refsamp} ms</span>
             <span>采样 {fw.n}</span>
             <span>复检 {fw.skipv ? "跳过" : "开启"}</span>
+            <span>重试 {fw.retry}</span>
           </div>
         ) : (
           <div className="text-ink-faint">尚无回执（下发参数后固件打印 `calib: params …`）</div>

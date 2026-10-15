@@ -26,6 +26,18 @@ export interface ChannelReport {
   valid: boolean;
 }
 
+export interface RetryEvent {
+  verify: boolean;
+  round: number;
+  idx: number;
+  ch: number;
+  at: number;
+  meas: number;
+  d: number;
+  old: number;
+  dropped: boolean;
+}
+
 export interface RefInfo {
   board: string | null;
   version: string | null;
@@ -68,6 +80,7 @@ export interface FwParams {
   refsamp: number;
   n: number;
   skipv: boolean;
+  retry: number;
 }
 
 export interface CalibParams {
@@ -80,6 +93,7 @@ export interface CalibParams {
   ref_sample_interval_ms: number;
   stable_count: number;
   skip_verify: boolean;
+  retry: number;
 }
 
 export interface CalibReport {
@@ -90,6 +104,7 @@ export interface CalibReport {
   grid: number[];
   verify_grid: number[];
   verify_points: number;
+  retries: RetryEvent[];
   channels: ChannelReport[];
   saved: boolean;
   verify_started: boolean;

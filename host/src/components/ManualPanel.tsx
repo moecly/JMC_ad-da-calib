@@ -202,7 +202,7 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
           <div className="text-xs text-ink-faint">暂无采样点</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-[13px]">
+            <table className="w-full text-[13px] whitespace-nowrap">
               <thead className="text-xs text-ink-faint">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium whitespace-nowrap">n</th>
@@ -228,7 +228,7 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
         <Card>
           <CardTitle>拟合 / 复检</CardTitle>
           <div className="overflow-x-auto">
-            <table className="w-full text-[13px]">
+            <table className="w-full text-[13px] whitespace-nowrap">
               <thead className="text-xs text-ink-faint">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium whitespace-nowrap">通道</th>

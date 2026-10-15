@@ -101,11 +101,13 @@ export function VerifyTab({ connected, report, ctl }: { connected: boolean; repo
         {error && <div className="mt-3 text-xs text-danger-ink">{error}</div>}
       </Card>
 
-      {report && report.verify_points > 0 && (
+      {/* 结果卡与图表常驻（无数据时显示占位）：数据被 reset 清空时若整块卸载，
+          页面高度骤减会把滚动位置钳制到顶部 */}
+      {report && (
         <Card>
           <CardTitle right={<Pill label={verifyLabel} tone={verifyTone} />}>复检结果</CardTitle>
           <div className="overflow-x-auto">
-            <table className="w-full text-[13px]">
+            <table className="w-full text-[13px] whitespace-nowrap">
               <thead className="text-xs text-ink-faint">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium whitespace-nowrap">通道</th>
@@ -122,7 +124,7 @@ export function VerifyTab({ connected, report, ctl }: { connected: boolean; repo
                     <td className="px-3 py-2 font-mono tabular-nums">{ch.verify ? num(ch.verify.max) : "—"}</td>
                     <td className="px-3 py-2 font-mono tabular-nums">{ch.verify_at ?? "—"}</td>
                     <td className="px-3 py-2 font-mono tabular-nums">{ch.verify ? num(ch.verify.rmse) : "—"}</td>
-                    <td className="px-3 py-2 font-mono text-ink-soft">
+                    <td className="px-3 py-2 font-mono whitespace-nowrap text-ink-soft">
                       {ch.coeff ? ch.coeff.map((c) => num(c, 6)).join(", ") : "—"}
                     </td>
                   </tr>
@@ -133,7 +135,7 @@ export function VerifyTab({ connected, report, ctl }: { connected: boolean; repo
         </Card>
       )}
 
-      {report && report.verify_points > 0 && <ErrorChart report={report} mode="verify" />}
+      {report && <ErrorChart report={report} mode="verify" />}
 
       {report && report.errors.length > 0 && (
         <Card>

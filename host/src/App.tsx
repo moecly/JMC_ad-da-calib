@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useBackend } from "./hooks/useBackend";
 import { useCalibParams } from "./hooks/useCalibParams";
 import { ConnectionBar } from "./components/ConnectionBar";
@@ -25,10 +25,16 @@ function App() {
   const { status, report, lines, probes, probeName, refreshProbes, clearAll } = useBackend();
   const ctl = useCalibParams();
   const [tab, setTab] = useState(0);
+  const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void refreshProbes();
   }, [refreshProbes]);
+
+  // 换 tab 回到顶部：容器元素在同一位置被复用，不重置会沿用上个 tab 的滚动位置
+  useEffect(() => {
+    scrollerRef.current?.scrollTo({ top: 0 });
+  }, [tab]);
 
   return (
     <div className="flex h-screen bg-canvas text-ink">
@@ -65,7 +71,7 @@ function App() {
             <LogConsole lines={lines} onClear={clearAll} />
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-[1100px] p-6">
               {tab === 0 && <OverviewTab status={status} report={report} probeName={probeName} />}
               {tab === 1 && (

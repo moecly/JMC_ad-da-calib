@@ -81,11 +81,15 @@ constexpr int kDefStableCount = 16;
 constexpr int kDefStableCode = 20;
 constexpr int kWindowMax = 32;  // s_measWin 的固定上限，stable_count 运行时取值 1..kWindowMax
 constexpr uint32_t kReplyTimeoutMs = 20;
-constexpr int kRetryMax = 3;
+constexpr int kRetryMax = 3;  // 链路超时重试，与 s_retryCount（坏点重测）无关
 constexpr uint32_t kPingIntervalMs = 100;
 constexpr int kPingMax = 20;
-constexpr double kDefResidualLimit = 100.0;
+// 残差门限：单点偏差 > 该值即判为坏点，只重测该点（见 s_retryCount），重测轮数用尽仍超标才失败
+constexpr double kDefResidualLimit = 20.0;
 constexpr double kDefCheckGate = 16.0;
+// 每点最多测量轮数（含首测）：拟合残差或复检超差时重测超标点，用尽仍超标即判失败
+constexpr int kDefRetryCount = 3;
+constexpr int kRetryCountMax = 9;
 
 // 运行时可调参数（OP_HOST_PARAMS 下发；复位回默认，不落 Flash）
 uint32_t s_settleMs = kDefSettleMs;
@@ -95,6 +99,7 @@ int s_stableTarget = kDefStableCount;
 int s_stableCode = kDefStableCode;
 double s_residualLimit = kDefResidualLimit;
 double s_checkGate = kDefCheckGate;
+int s_retryCount = kDefRetryCount;
 bool s_skipVerify = false;
 
 CalibRecord s_rec;
@@ -104,6 +109,15 @@ enum Phase { PH_SEND, PH_WAIT, PH_SETTLE };
 
 float s_samples[4][kGridN];
 float s_verify[4][kGridN];
+int s_fitRounds;  // 扫描已测量轮数（含首测），上限 s_retryCount
+int s_vfyRounds;  // 复检已测量轮数（含首测），上限 s_retryCount
+// 坏点重测列表：超标点索引 + 该点待刷新的通道位。只覆盖超标通道，已合格样本保持原值，
+// 故一轮重测不可能把原本合格的通道拖成坏点（重测值仅在与当前拟合更贴合时才被采纳）
+int s_rsIdx[kGridN];
+uint8_t s_rsMask[kGridN];
+int s_rsN;
+int s_rsPos;
+bool s_rsActive;
 double s_verMax[4];
 double s_verSumSq[4];
 uint16_t s_verMaxAt[4];
@@ -227,12 +241,17 @@ void ResetRunCounters() {
     s_waitMs = 0;
     s_verifyReported = false;
     s_verifyIdx = 0;
+    s_fitRounds = 0;
+    s_vfyRounds = 0;
+    s_rsN = 0;
+    s_rsPos = 0;
+    s_rsActive = false;
 }
 
-// 运行时可调参数帧（OP_HOST_PARAMS）。须在 START/VERIFY 之前下发——采样期只读当前值，
+// 运行时可调参数帧（OP_HOST_PARAMS，payload 18 B）。须在 START/VERIFY 之前下发——采样期只读当前值，
 // 运行中修改不生效；不落 Flash，复位回默认
 void ApplyParams(const uint8_t* p, uint8_t len) {
-    if (len < 17) {
+    if (len < 18) {
         LogError << "calib: error bad-op";
         return;
     }
@@ -247,16 +266,17 @@ void ApplyParams(const uint8_t* p, uint8_t len) {
     int n = p[15];
     s_stableTarget = n < 1 ? 1 : (n > kWindowMax ? kWindowMax : n);
     s_skipVerify = (p[16] & 1) != 0;
+    s_retryCount = p[17] < 1 ? 1 : (p[17] > kRetryCountMax ? kRetryCountMax : p[17]);
     if (s_residualLimit == 0) s_residualLimit = 1;
     if (s_checkGate == 0) s_checkGate = 1;
     if (s_sampleIntervalMs == 0) s_sampleIntervalMs = 1;
     if (s_refSampleIntervalMs == 0) s_refSampleIntervalMs = 1;
-    char m[160];
+    char m[176];
     snprintf(m, sizeof(m),
-             "calib: params gate=%u resid=%u stable=%u settle=%u first=%u samp=%u refsamp=%u n=%u skipv=%u",
+             "calib: params gate=%u resid=%u stable=%u settle=%u first=%u samp=%u refsamp=%u n=%u skipv=%u retry=%u",
              (unsigned)s_checkGate, (unsigned)s_residualLimit, (unsigned)s_stableCode, (unsigned)s_settleMs,
              (unsigned)s_firstSettleMs, (unsigned)s_sampleIntervalMs, (unsigned)s_refSampleIntervalMs,
-             (unsigned)s_stableTarget, s_skipVerify ? 1u : 0u);
+             (unsigned)s_stableTarget, s_skipVerify ? 1u : 0u, (unsigned)s_retryCount);
     LogInfo << m;
 }
 
@@ -1090,7 +1110,7 @@ void StartPoint() {
         s_stableMin[ch] = 0xFFFF;
         s_stableMax[ch] = 0;
     }
-    if (s_sweepIdx == 0) {
+    if (s_sweepIdx == 0 && !s_rsActive) {
         for (int r = 0; r < s_runCount; r++) {
             char rm[48];
             snprintf(rm, sizeof(rm), "calib: run ch=%u da=%u", (unsigned)s_runs[r].adCh, (unsigned)s_runs[r].daCh);
@@ -1131,12 +1151,54 @@ void StartPoint() {
 }
 
 void AdvancePoint() {
+    if (s_rsActive) {
+        s_rsPos++;
+        if (s_rsPos >= s_rsN) {
+            s_rsActive = false;
+            s_state = S_FIT;  // 重测完 → 重新拟合
+            return;
+        }
+        s_sweepIdx = s_rsIdx[s_rsPos];
+        s_phase = PH_SEND;
+        return;
+    }
     s_sweepIdx++;
     if (s_sweepIdx >= kGridN) {
         s_state = S_FIT;
         return;
     }
     s_phase = PH_SEND;
+}
+
+// 重测值只在**不差于**旧样本（更贴合当前拟合）时才采纳；否则保留旧样本——旧样本本身是合格的，
+// 不能让重测自己引入的坏点把合格点拖坏（保证一轮重测不会新增坏点）
+bool AcceptRetrySample(uint8_t ch, int idx, float v) {
+    float prev = s_samples[ch][idx];
+    double dn = PolyEval(s_coeff[ch], (double)v) - s_gridD[idx];
+    double dp = PolyEval(s_coeff[ch], (double)prev) - s_gridD[idx];
+    if (dn < 0) dn = -dn;
+    if (dp < 0) dp = -dp;
+    bool keep = dn <= dp;
+    char m[128];
+    snprintf(m, sizeof(m), "calib: rtry%u ch=%u ideal=%u meas=%.1f d=%.1f old=%.1f%s", (unsigned)idx, (unsigned)ch,
+             (unsigned)kGridLive[idx], (double)v, dn, dp, keep ? "" : " drop");
+    LogInfo << m;
+    return keep;
+}
+
+// 复检重测同理：只在 |d| 不差于旧样本（即更贴合已落盘系数）时采纳
+bool AcceptVerifyRetry(uint8_t ch, int idx, float v) {
+    float prev = s_verify[ch][idx];
+    double dn = PolyEval(s_rec.coeff[ch], (double)v) - s_gridD[idx];
+    double dp = PolyEval(s_rec.coeff[ch], (double)prev) - s_gridD[idx];
+    if (dn < 0) dn = -dn;
+    if (dp < 0) dp = -dp;
+    bool keep = dn <= dp;
+    char m[128];
+    snprintf(m, sizeof(m), "calib: vrtry%u ch=%u set=%u meas=%.1f d=%.1f old=%.1f%s", (unsigned)idx, (unsigned)ch,
+             (unsigned)kGridLive[idx], (double)v, dn, dp, keep ? "" : " drop");
+    LogInfo << m;
+    return keep;
 }
 
 void DoSweep() {
@@ -1227,8 +1289,10 @@ void DoSweep() {
             uint8_t ch = s_runs[r].adCh;
             int src = s_runs[r].daCh;
             float mid = s_measMid[src];
-            s_samples[ch][s_sweepIdx] = mid;
             bool settled = s_measMax[src] - s_measMin[src] <= (float)s_stableCode;
+            if (s_rsActive && !(s_rsMask[s_rsPos] & (1u << ch))) continue;  // 该点本通道未超标，保留首测样本
+            if (s_rsActive && !AcceptRetrySample(ch, s_sweepIdx, mid)) continue;
+            s_samples[ch][s_sweepIdx] = mid;
             char m[112];
             snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
                      (unsigned)kGridLive[s_sweepIdx], (double)mid, settled ? "" : " unstable");
@@ -1278,6 +1342,8 @@ void DoSweep() {
         for (int r = 0; r < s_runCount; r++) {
             uint8_t ch = s_runs[r].adCh;
             float mid = MedianWin(s_measWin[ch], s_stableTarget);
+            if (s_rsActive && !(s_rsMask[s_rsPos] & (1u << ch))) continue;  // 该点本通道未超标，保留首测样本
+            if (s_rsActive && !AcceptRetrySample(ch, s_sweepIdx, mid)) continue;
             s_samples[ch][s_sweepIdx] = mid;
             char m[112];
             snprintf(m, sizeof(m), "calib: dpt%u ch=%u ideal=%u meas=%.1f%s", (unsigned)s_sweepIdx, (unsigned)ch,
@@ -1308,20 +1374,27 @@ void DoSweep() {
 }
 
 void AdvVerifyPoint() {
+    if (s_rsActive) {
+        s_rsPos++;
+        if (s_rsPos >= s_rsN) {
+            s_rsActive = false;
+            s_verifyIdx = kGridN;  // 重测完 → 回到汇总
+            return;
+        }
+        s_verifyIdx = s_rsIdx[s_rsPos];
+        s_stableCount = -1;
+        s_phase = PH_SEND;
+        return;
+    }
     s_verifyIdx++;
     s_stableCount = -1;
     s_phase = PH_SEND;
 }
 
+// 逐点偏差诊断行。聚合量不再增量累积——重测会替换样本，统一由 VerifyRecalc() 从 s_verify 重算
 void ChkVerifyPoint(uint8_t ch) {
     const double set = (double)kGridLive[s_verifyIdx];
     double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][s_verifyIdx]) - set;
-    s_verSumSq[ch] += d * d;
-    double ad = d < 0 ? -d : d;
-    if (ad > s_verMax[ch]) {
-        s_verMax[ch] = ad;
-        s_verMaxAt[ch] = kGridLive[s_verifyIdx];
-    }
     char msg[64];
     snprintf(msg, sizeof(msg), "calib: vfy set=%u ch%u d=%+.1f", (unsigned)kGridLive[s_verifyIdx], (unsigned)ch, d);
     LogInfo << msg;
@@ -1452,13 +1525,16 @@ void DoVerifySweep() {
         for (int r = 0; r < s_runCount; r++) {
             uint8_t ch = s_runs[r].adCh;
             int src = s_runs[r].daCh;
-            s_verify[ch][s_verifyIdx] = s_measMid[src];
+            float mid = s_measMid[src];
             bool settled = s_measMax[src] - s_measMin[src] <= (float)s_stableCode;
+            if (s_rsActive && !(s_rsMask[s_rsPos] & (1u << ch))) continue;  // 该点本通道未超限，保留首测样本
+            if (s_rsActive && !AcceptVerifyRetry(ch, s_verifyIdx, mid)) continue;
+            s_verify[ch][s_verifyIdx] = mid;
             char m[112];
             snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%.1f%s", (unsigned)s_verifyIdx, (unsigned)ch,
-                     (unsigned)kGridLive[s_verifyIdx], (double)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");
+                     (unsigned)kGridLive[s_verifyIdx], (double)mid, settled ? "" : " unstable");
             LogInfo << m;
-            ChkVerifyPoint(ch);
+            if (!s_rsActive) ChkVerifyPoint(ch);
         }
         AdvVerifyPoint();
         return;
@@ -1490,12 +1566,15 @@ void DoVerifySweep() {
     for (int r = 0; r < s_runCount; r++) {
         uint8_t ch = s_runs[r].adCh;
         bool settled = s_stableMax[ch] - s_stableMin[ch] <= s_stableCode;
-        s_verify[ch][s_verifyIdx] = MedianWin(s_measWin[ch], s_stableTarget);
+        float mid = MedianWin(s_measWin[ch], s_stableTarget);
+        if (s_rsActive && !(s_rsMask[s_rsPos] & (1u << ch))) continue;  // 该点本通道未超限，保留首测样本
+        if (s_rsActive && !AcceptVerifyRetry(ch, s_verifyIdx, mid)) continue;
+        s_verify[ch][s_verifyIdx] = mid;
         char m[112];
         snprintf(m, sizeof(m), "calib: dvfy%u ch=%u set=%u meas=%.1f%s", (unsigned)s_verifyIdx, (unsigned)ch,
-                 (unsigned)kGridLive[s_verifyIdx], (double)s_verify[ch][s_verifyIdx], settled ? "" : " unstable");
+                 (unsigned)kGridLive[s_verifyIdx], (double)mid, settled ? "" : " unstable");
         LogInfo << m;
-        ChkVerifyPoint(ch);
+        if (!s_rsActive) ChkVerifyPoint(ch);
     }
     AdvVerifyPoint();
 #else
@@ -1509,18 +1588,58 @@ void DoVerifySweep() {
 #endif
 }
 
+// 复检聚合量由样本统一重算：重测会替换个别样本，增量累积不再可靠
+void VerifyRecalc() {
+    for (int ch = 0; ch < 4; ch++) {
+        if (!(s_chMask & (1u << ch))) continue;
+        double maxD = 0.0;
+        double sumSq = 0.0;
+        uint16_t at = 0;
+        for (int i = 0; i < kGridN; i++) {
+            double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][i]) - s_gridD[i];
+            sumSq += d * d;
+            if (d < 0) d = -d;
+            if (d > maxD) {
+                maxD = d;
+                at = kGridLive[i];
+            }
+        }
+        s_verMax[ch] = maxD;
+        s_verSumSq[ch] = sumSq;
+        s_verMaxAt[ch] = at;
+    }
+}
+
+// 收集复检超门限点（合并所有超限通道，逐点记下需刷新的通道位）
+bool CollectVerifyOffenders() {
+    s_rsN = 0;
+    for (int i = 0; i < kGridN; i++) {
+        uint8_t m = 0;
+        for (int ch = 0; ch < 4; ch++) {
+            if (!(s_chMask & (1u << ch))) continue;
+            double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][i]) - s_gridD[i];
+            if (d < 0) d = -d;
+            if (d >= s_checkGate) m |= (uint8_t)(1u << ch);
+        }
+        if (m) {
+            s_rsIdx[s_rsN] = i;
+            s_rsMask[s_rsN] = m;
+            s_rsN++;
+        }
+    }
+    return s_rsN > 0;
+}
+
 void DoVerify() {
     if (!s_verifyReported) {
-        for (int ch = 0; ch < 4; ch++) {
-            s_verMax[ch] = 0.0;
-            for (int i = 0; i < kGridN; i++) s_verSumSq[ch] = 0.0;
-        }
         LogInfo << "calib: verify start";
         s_phase = PH_SEND;
         s_verifyReported = true;
+        s_vfyRounds = 1;
         return;
     }
 
+    VerifyRecalc();
     char msg[256];
     int n = snprintf(msg, sizeof(msg), "calib: verify");
     bool pass = true;
@@ -1535,26 +1654,40 @@ void DoVerify() {
     }
     LogInfo << msg;
 
-    bool anyBad = false;
-    for (int ch = 0; ch < 4; ch++) {
-        if (!(s_chMask & (1u << ch))) continue;
-        if (s_verMax[ch] < s_checkGate) continue;
-        char ol[256];
-        int m = snprintf(ol, sizeof(ol), "calib: vfy ch%d |d|>=%d at:", ch, (int)s_checkGate);
-        for (int i = 0; i < kGridN && m < (int)sizeof(ol) - 16; i++) {
-            double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][i]) - (double)kGridLive[i];
-            if (d < 0) d = -d;
-            if (d >= s_checkGate) m += snprintf(ol + m, sizeof(ol) - m, " %u(%.0f)", (unsigned)kGridLive[i], d);
+    if (!pass) {
+        // 尖峰是随机单次事件：只重测超门限点（含首测共 s_retryCount 轮），重测完再重算汇总
+        if (s_vfyRounds < s_retryCount && CollectVerifyOffenders()) {
+            char m[64];
+            snprintf(m, sizeof(m), "calib: vretry %d/%d n=%d", s_vfyRounds, s_retryCount, s_rsN);
+            LogInfo << m;
+            s_vfyRounds++;
+            s_rsActive = true;
+            s_rsPos = 0;
+            s_verifyIdx = s_rsIdx[0];
+            s_stableCount = -1;
+            s_phase = PH_SEND;
+            return;
         }
-        LogInfo << ol;
-        anyBad = true;
+        // 重测用尽仍超限：列出超标点后判 FAIL（上位机把 |d|>= 行判为错误）
+        for (int ch = 0; ch < 4; ch++) {
+            if (!(s_chMask & (1u << ch))) continue;
+            if (s_verMax[ch] < s_checkGate) continue;
+            char ol[256];
+            int m = snprintf(ol, sizeof(ol), "calib: vfy ch%d |d|>=%d at:", ch, (int)s_checkGate);
+            for (int i = 0; i < kGridN && m < (int)sizeof(ol) - 16; i++) {
+                double d = PolyEval(s_rec.coeff[ch], (double)s_verify[ch][i]) - (double)kGridLive[i];
+                if (d < 0) d = -d;
+                if (d >= s_checkGate) m += snprintf(ol + m, sizeof(ol) - m, " %u(%.0f)", (unsigned)kGridLive[i], d);
+            }
+            LogInfo << ol;
+        }
     }
     char res[64];
     snprintf(res, sizeof(res), "calib: verify %s", pass ? "PASS" : "FAIL");
-    if (anyBad) {
-        LogError << res;
-    } else {
+    if (pass) {
         LogInfo << res;
+    } else {
+        LogError << res;
     }
     s_state = S_DONE;
     LedSet(true);
@@ -1615,7 +1748,45 @@ void DoDump() {
     s_state = S_SAVE;
 }
 
+// 超限点清单。只在最终放弃时打印：上位机把 `chN resid>` 行立即判为 fail（见 host/prod calib.rs）
+void LogResidOver(uint8_t ch) {
+    char rs[256];
+    int n = snprintf(rs, sizeof(rs), "calib: ch%d resid>%d at:", ch, (int)s_residualLimit);
+    bool any = false;
+    for (int i = 0; i < kGridN && n < (int)sizeof(rs) - 16; i++) {
+        double d = PolyEval(s_coeff[ch], (double)s_samples[ch][i]) - s_gridD[i];
+        if (d < 0) d = -d;
+        if (d > s_residualLimit) {
+            n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGridLive[i], d);
+            any = true;
+        }
+    }
+    if (any) LogError << rs;
+}
+
+// 收集本轮超限点（合并所有通道，逐点记下需刷新的通道位）。无超限点时返回 false
+bool CollectOffenders() {
+    s_rsN = 0;
+    for (int i = 0; i < kGridN; i++) {
+        uint8_t m = 0;
+        for (int r = 0; r < s_runCount; r++) {
+            uint8_t ch = s_runs[r].adCh;
+            double d = PolyEval(s_coeff[ch], (double)s_samples[ch][i]) - s_gridD[i];
+            if (d < 0) d = -d;
+            if (d > s_residualLimit) m |= (uint8_t)(1u << ch);
+        }
+        if (m) {
+            s_rsIdx[s_rsN] = i;
+            s_rsMask[s_rsN] = m;
+            s_rsN++;
+        }
+    }
+    return s_rsN > 0;
+}
+
 void FitAll() {
+    s_fitRounds++;
+    bool over = false;
     for (int r = 0; r < s_runCount; r++) {
         const uint8_t ch = s_runs[r].adCh;
         double xs[kGridN];
@@ -1643,20 +1814,25 @@ void FitAll() {
         snprintf(st, sizeof(st), "calib: ch%d resid max=%.1f @ideal=%u rmse=%.1f", ch, maxRes,
                  (unsigned)kGridLive[maxAt], sqrt(sumSq / kGridN));
         LogInfo << st;
-        if (maxRes > s_residualLimit) {
-            char rs[256];
-            int n = snprintf(rs, sizeof(rs), "calib: ch%d resid>%d at:", ch, (int)s_residualLimit);
-            for (int i = 0; i < kGridN && n < (int)sizeof(rs) - 16; i++) {
-                double d = PolyEval(s_coeff[ch], xs[i]) - s_gridD[i];
-                if (d < 0) d = -d;
-                if (d > s_residualLimit) {
-                    n += snprintf(rs + n, sizeof(rs) - n, " %u(%.0f)", (unsigned)kGridLive[i], d);
-                }
-            }
-            LogError << rs;
-            EnterFail();
+        if (maxRes > s_residualLimit) over = true;
+    }
+
+    if (over) {
+        // 尖峰是随机单次事件：只重测超限点（含首测共 s_retryCount 轮），不重跑整轮扫描
+        if (s_fitRounds < s_retryCount && CollectOffenders()) {
+            char m[64];
+            snprintf(m, sizeof(m), "calib: retry %d/%d n=%d", s_fitRounds, s_retryCount, s_rsN);
+            LogInfo << m;
+            s_rsActive = true;
+            s_rsPos = 0;
+            s_sweepIdx = s_rsIdx[0];
+            s_phase = PH_SEND;
+            s_state = S_SWEEP;
             return;
         }
+        for (int r = 0; r < s_runCount; r++) LogResidOver(s_runs[r].adCh);
+        EnterFail();
+        return;
     }
 
     s_dumpLine = 0;

@@ -74,6 +74,24 @@ pub struct FwParams {
     pub refsamp: u16,
     pub n: u16,
     pub skipv: bool,
+    pub retry: u16,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RetryEvent {
+    pub verify: bool,
+    pub round: u8,
+    pub idx: u32,
+    pub ch: usize,
+    /// 扫描段为 ideal，复检段为 set
+    pub at: f64,
+    pub meas: f64,
+    /// 重测样本相对当前系数（复检为落盘系数）的偏差
+    pub d: f64,
+    /// 被替换的旧样本偏差
+    pub old: f64,
+    /// true = |d| 不优于 |old|，保留旧样本
+    pub dropped: bool,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -85,6 +103,8 @@ pub struct CalibReport {
     pub grid: Vec<u16>,
     pub verify_grid: Vec<u16>,
     pub verify_points: u32,
+    /// 坏点重测事件（扫描与复检，按到达顺序）
+    pub retries: Vec<RetryEvent>,
     pub channels: Vec<ChannelReport>,
     pub saved: bool,
     pub verify_started: bool,
@@ -136,9 +156,21 @@ static MVERIFY_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static PARAMS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^params gate=(\d+) resid=(\d+) stable=(\d+) settle=(\d+) first=(\d+) samp=(\d+) refsamp=(\d+) n=(\d+) skipv=(\d+)$",
+        r"^params gate=(\d+) resid=(\d+) stable=(\d+) settle=(\d+) first=(\d+) samp=(\d+) refsamp=(\d+) n=(\d+) skipv=(\d+) retry=(\d+)$",
     )
     .unwrap()
+});
+static RETRY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^retry (\d+)/(\d+) n=(\d+)$").unwrap());
+static VRETRY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^vretry (\d+)/(\d+) n=(\d+)$").unwrap());
+static RTRY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^rtry(\d+) ch=(\d+) ideal=(\d+) meas=([-0-9.eE+]+) d=([-0-9.eE+]+) old=([-0-9.eE+]+)( drop)?$")
+        .unwrap()
+});
+static VRTRY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^vrtry(\d+) ch=(\d+) set=(\d+) meas=([-0-9.eE+]+) d=([-0-9.eE+]+) old=([-0-9.eE+]+)( drop)?$")
+        .unwrap()
 });
 
 pub fn poly_eval(coeff: &[f64; 4], x: f64) -> f64 {
@@ -173,6 +205,9 @@ fn parse_f64(s: &str) -> f64 {
 
 pub struct Parser {
     pub report: CalibReport,
+    /// 当前重测轮次（由 `calib: retry r/N` / `calib: vretry r/N` 横幅更新）
+    sweep_round: u8,
+    verify_round: u8,
 }
 
 impl Default for Parser {
@@ -211,6 +246,7 @@ fn fresh_report() -> CalibReport {
         grid: Vec::new(),
         verify_grid: Vec::new(),
         verify_points: 0,
+        retries: Vec::new(),
         channels,
         saved: false,
         verify_started: false,
@@ -234,6 +270,8 @@ impl Parser {
     pub fn new() -> Self {
         Self {
             report: fresh_report(),
+            sweep_round: 0,
+            verify_round: 0,
         }
     }
 
@@ -254,6 +292,23 @@ impl Parser {
 
     fn chan(&mut self, ch: usize) -> &mut ChannelReport {
         &mut self.report.channels[ch]
+    }
+
+    /// `rtry<idx> ch= ideal= meas= d= old=[ drop]` 与
+    /// `vrtry<idx> ch= set= meas= d= old=[ drop]` 分组布局一致，共用一个解析
+    fn push_retry(&mut self, verify: bool, c: &regex::Captures) {
+        let ev = RetryEvent {
+            verify,
+            round: if verify { self.verify_round } else { self.sweep_round },
+            idx: parse_u16(&c[1]) as u32,
+            ch: parse_u16(&c[2]) as usize,
+            at: parse_f64(&c[3]),
+            meas: parse_f64(&c[4]),
+            d: parse_f64(&c[5]),
+            old: parse_f64(&c[6]),
+            dropped: c.get(7).is_some(),
+        };
+        self.report.retries.push(ev);
     }
 
     pub fn feed(&mut self, message: &str) -> bool {
@@ -454,6 +509,25 @@ impl Parser {
             return true;
         }
 
+        // 坏点重测：横幅行只记轮次；逐点行记成事件（不置 fail、不进 errors——
+        // 只有用尽轮数后的 `chN resid>` / `vfy chN |d|>=` 才是失败）
+        if let Some(c) = RETRY_RE.captures(rest) {
+            self.sweep_round = parse_u16(&c[1]) as u8;
+            return true;
+        }
+        if let Some(c) = VRETRY_RE.captures(rest) {
+            self.verify_round = parse_u16(&c[1]) as u8;
+            return true;
+        }
+        if let Some(c) = RTRY_RE.captures(rest) {
+            self.push_retry(false, &c);
+            return true;
+        }
+        if let Some(c) = VRTRY_RE.captures(rest) {
+            self.push_retry(true, &c);
+            return true;
+        }
+
         if let Some(c) = DVFY_RE.captures(rest) {
             let idx = parse_u16(&c[1]) as usize;
             let ch = parse_u16(&c[2]) as usize;
@@ -537,6 +611,7 @@ impl Parser {
                 refsamp: parse_u16(&c[7]),
                 n: parse_u16(&c[8]),
                 skipv: &c[9] == "1",
+                retry: parse_u16(&c[10]),
             });
             return true;
         }
@@ -1117,7 +1192,7 @@ mod tests {
         let lines = [
             "HostPoll|calib: reset",
             "HostPoll|calib: role DUT",
-            "HostPoll|calib: params gate=50 resid=800 stable=20 settle=300 first=600 samp=5 refsamp=20 n=16 skipv=1",
+            "HostPoll|calib: params gate=50 resid=800 stable=20 settle=300 first=600 samp=5 refsamp=20 n=16 skipv=1 retry=3",
             "DoSweep|calib: dpt0 ch=0 ideal=0 meas=1.5",
             "FitAll|calib: ch0 resid max=1.5 @ideal=0 rmse=0.5",
             "DoSave|calib: saved",
@@ -1172,7 +1247,7 @@ mod tests {
     fn parses_fw_params() {
         let mut parser = Parser::new();
         assert!(parser.feed(
-            "calib: params gate=50 resid=800 stable=20 settle=300 first=600 samp=5 refsamp=20 n=16 skipv=1"
+            "calib: params gate=50 resid=800 stable=20 settle=300 first=600 samp=5 refsamp=20 n=16 skipv=1 retry=3"
         ));
         let p = parser.report.fw_params.clone().unwrap();
         assert_eq!(p.gate, 50);
@@ -1184,5 +1259,78 @@ mod tests {
         assert_eq!(p.refsamp, 20);
         assert_eq!(p.n, 16);
         assert!(p.skipv);
+    }
+
+    #[test]
+    fn retry_lines_are_non_fatal() {
+        // 拟合残差/复检超差触发的自动重测行必须被视为非致命：不得置 fail、不得进 errors
+        let mut parser = Parser::new();
+        assert!(parser.feed(
+            "calib: params gate=50 resid=20 stable=20 settle=300 first=600 samp=5 refsamp=20 n=16 skipv=0 retry=3"
+        ));
+        assert!(parser.feed("calib: state fit"));
+        assert!(parser.feed("calib: ch0 resid max=18.0 @ideal=0 rmse=1.0"));
+        assert_eq!(parser.report.phase, "fit");
+
+        // 拟合阶段的重测行：被解析但仍非致命
+        assert!(parser.feed("calib: retry 1/2 n=2"));
+        assert!(parser.feed("calib: rtry5 ch=0 ideal=5000 meas=4890.0 d=110.0 old=112.0"));
+        assert_eq!(parser.report.phase, "fit");
+        assert!(parser.report.errors.is_empty());
+        let e = &parser.report.retries[0];
+        assert!(!e.verify);
+        assert_eq!((e.round, e.idx, e.ch), (1, 5, 0));
+        assert_eq!(e.at, 5000.0);
+        assert_eq!((e.meas, e.d, e.old), (4890.0, 110.0, 112.0));
+        assert!(!e.dropped);
+
+        assert!(parser.feed("calib: verify start"));
+        assert!(parser.feed("calib: verify ch0 max=13.0 @set=0 rmse=3.0"));
+        assert_eq!(parser.report.phase, "verify");
+
+        // 复检阶段的重测行（含 drop）
+        assert!(parser.feed("calib: vretry 1/2 n=1"));
+        assert!(parser.feed("calib: vrtry7 ch=0 set=7000 meas=7013.0 d=13.0 old=22.0 drop"));
+        assert_eq!(parser.report.phase, "verify");
+        assert!(parser.report.errors.is_empty());
+        let e = &parser.report.retries[1];
+        assert!(e.verify);
+        assert_eq!((e.round, e.idx, e.ch, e.at), (1, 7, 0, 7000.0));
+        assert!(e.dropped);
+        assert_eq!(parser.report.fw_params.as_ref().unwrap().retry, 3);
+    }
+
+    #[test]
+    fn retry_round_keeps_run_passing_with_fresh_resid() {
+        // 首轮残差超标 → 重测 → 第二轮达标的完整流程：末态仍应 PASS，
+        // 且卡片显示重测后的残差/复检值（不是首轮超标的那个数）
+        let mut parser = Parser::new();
+        assert!(parser.feed("calib: role DUT"));
+        assert!(parser.feed("calib: ch0 resid max=118.0 @ideal=12000 rmse=25.0"));
+        assert_eq!(parser.report.channels[0].resid.as_ref().unwrap().max, 118.0);
+
+        assert!(parser.feed("calib: retry 1/3 n=2"));
+        assert!(parser.feed("calib: rtry12 ch=0 ideal=12000 meas=11882.0 d=118.0 old=121.0"));
+        assert!(parser.feed("calib: rtry40 ch=1 ideal=40000 meas=39991.0 d=9.0 old=60.0"));
+        assert!(parser.feed("calib: vretry 1/3 n=1"));
+        assert!(parser.feed("calib: vrtry58 ch=0 set=58000 meas=58024.0 d=24.0 old=47.0 drop"));
+
+        assert!(parser.feed("calib: ch0 resid max=1.5 @ideal=37000 rmse=0.5"));
+        assert!(parser.feed("calib: saved"));
+        assert!(parser.feed("calib: verify start"));
+        assert!(parser.feed("calib: verify ch0 max=8.0 @set=62000 rmse=3.0"));
+        assert!(parser.feed("calib: verify PASS"));
+
+        let r = &parser.report;
+        assert!(r.errors.is_empty());
+        assert_eq!(r.retries.len(), 3);
+        assert_eq!(r.retries.iter().filter(|e| e.dropped).count(), 1);
+        assert_eq!(r.retries.iter().map(|e| e.ch).collect::<Vec<_>>(), vec![0, 1, 0]);
+        assert_eq!(r.phase, "done");
+        assert_eq!(r.verify_pass, Some(true));
+        assert!(!r.verify_skipped);
+        assert_eq!(r.channels[0].resid.as_ref().unwrap().max, 1.5);
+        assert_eq!(r.channels[0].resid_at, Some(37000));
+        assert_eq!(r.channels[0].verify.as_ref().unwrap().max, 8.0);
     }
 }

@@ -28,7 +28,7 @@ const levelClass = (level: string) => {
 export function LogConsole({ lines, onClear }: Props) {
   const [filter, setFilter] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const shown = useMemo(() => {
     if (!filter) return lines;
@@ -36,8 +36,10 @@ export function LogConsole({ lines, onClear }: Props) {
     return lines.filter((l) => l.raw.toLowerCase().includes(needle));
   }, [lines, filter]);
 
+  // 只滚日志自身容器：scrollIntoView 会连带滚动所有可滚动祖先（含页面级容器）
   useEffect(() => {
-    if (autoScroll) bottomRef.current?.scrollIntoView({ block: "end" });
+    const el = listRef.current;
+    if (autoScroll && el) el.scrollTop = el.scrollHeight;
   }, [shown, autoScroll]);
 
   const loadFile = async () => {
@@ -69,13 +71,12 @@ export function LogConsole({ lines, onClear }: Props) {
           </Button>
         </div>
       </div>
-      <div className="flex-1 overflow-auto p-3 font-mono text-xs leading-relaxed">
+      <div ref={listRef} className="flex-1 overflow-auto p-3 font-mono text-xs leading-relaxed">
         {shown.map((l, i) => (
           <div key={i} className={levelClass(l.level)}>
             {l.raw}
           </div>
         ))}
-        <div ref={bottomRef} />
       </div>
     </div>
   );
