@@ -15,6 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  GH_REPO: ${{ github.repository }}
   BOARDS: AD_4CH DA_4CH
   ROLES: APP REF DUT MANUAL
   BUILD_TYPES: Debug Release
