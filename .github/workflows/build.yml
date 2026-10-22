@@ -70,14 +70,16 @@ jobs:
           sha256sum "firmware-${ver}.zip" > "firmware-${ver}.zip.sha256"
           ls -l firmware-*.zip*
 
+      # 仅 tag 上传 artifact（release 用）；main/PR 只验证构建，避免占满 artifact 配额
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: firmware
           path: |
             firmware-*.zip
             firmware-*.zip.sha256
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
   # 桌面上位机是原生程序，按平台各出一套安装包
   desktop:
@@ -126,7 +128,9 @@ jobs:
         working-directory: ${{ matrix.app }}/src-tauri/target/release/bundle
         run: find . -maxdepth 2 -type f | sort
 
+      # 同上：仅 tag 上传，main/PR 不占 artifact 配额
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: desktop-${{ matrix.os }}-${{ matrix.app }}
           path: |
@@ -137,7 +141,7 @@ jobs:
             ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.msi
             ${{ matrix.app }}/src-tauri/target/release/bundle/*/*-setup.exe
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
   release:
     name: release
