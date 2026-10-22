@@ -7,7 +7,6 @@ import { Button, Card, CardTitle, Field, Input, Pill, Select } from "./ui";
 
 const clamp = (v: number) => Math.max(0, Math.min(65535, v));
 
-const MANUAL_MAX_POINTS = 16;
 const MANUAL_MIN_POINTS = 8;
 
 const boardLabel = (dir: string | null) => (dir === "ad" ? "AD 采集板" : dir === "da" ? "DA 输出板" : "?");
@@ -32,7 +31,6 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
   const replaced = manual?.last_replace && manual.last_replace.ch === ch ? manual.last_replace : null;
   const replacedPoint = replaced ? (channel?.points ?? []).find((p) => p.n === replaced.n) ?? null : null;
   const points = channel?.points.length ?? 0;
-  const full = points >= MANUAL_MAX_POINTS;
   const pendingRaw = channel?.pending_raw ?? null;
   const replaceAt = pendingRaw !== null ? (channel?.points.find((p) => p.raw === pendingRaw) ?? null) : null;
   const samplingCh = manual?.sampling_ch ?? null;
@@ -122,7 +120,7 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
             <Select value={ch} disabled={!ready} onChange={(e) => setCh(Number(e.currentTarget.value))}>
               {[0, 1, 2, 3].map((c) => (
                 <option key={c} value={c}>
-                  ch{c}（{manual?.channels[c]?.points.length ?? 0}/{MANUAL_MAX_POINTS} 点）
+                  ch{c}（{manual?.channels[c]?.points.length ?? 0} 点）
                 </option>
               ))}
             </Select>
@@ -146,21 +144,19 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
               <span className="font-mono tabular-nums text-xs text-ink-faint">ideal={ideal}</span>
               <Button
                 size="sm"
-                disabled={!ready || samplingCh !== null || (adReplaceAt === null && full)}
+                disabled={!ready || samplingCh !== null}
                 onClick={() => run(() => api.manualAdd(ch, ideal))}
               >
                 采集点
               </Button>
-              <span className={`text-xs ${full || adReplaceAt !== null ? "text-warn-ink" : "text-ink-faint"}`}>
+              <span className={`text-xs ${adReplaceAt !== null ? "text-warn-ink" : "text-ink-faint"}`}>
                 {samplingCh !== null
                   ? `采集中 ch${samplingCh}…（完成后自动出点并刷新曲线）`
                   : adReplaceAt !== null
                     ? `ideal=${ideal} 已存在，采点将覆盖第 ${adReplaceAt.n} 点`
-                    : full
-                      ? `ch${ch} 已满 ${MANUAL_MAX_POINTS} 点`
-                      : points < MANUAL_MIN_POINTS
-                        ? `ch${ch} 已采 ${points} 点，至少 ${MANUAL_MIN_POINTS} 点且跨度 ≥ 4096 才能拟合`
-                        : `ch${ch} 已采 ${points} 点`}
+                    : points < MANUAL_MIN_POINTS
+                      ? `ch${ch} 已采 ${points} 点，至少 ${MANUAL_MIN_POINTS} 点且跨度 ≥ 4096 才能拟合`
+                      : `ch${ch} 已采 ${points} 点`}
               </span>
             </div>
           </div>
@@ -184,17 +180,15 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
               <span className="font-mono tabular-nums text-xs text-ink-faint">ideal={ideal}</span>
               <Button
                 size="sm"
-                disabled={!ready || samplingCh !== null || pendingRaw === null || (replaceAt === null && full)}
+                disabled={!ready || samplingCh !== null || pendingRaw === null}
                 onClick={() => run(() => api.manualAdd(ch, ideal))}
               >
                 采集点
               </Button>
-              <span className={`text-xs ${full || replaceAt !== null ? "text-warn-ink" : "text-ink-faint"}`}>
+              <span className={`text-xs ${replaceAt !== null ? "text-warn-ink" : "text-ink-faint"}`}>
                 {replaceAt !== null
                   ? `raw=${pendingRaw} 已存在，采点将覆盖第 ${replaceAt.n} 点`
-                  : full
-                    ? `ch${ch} 已满 ${MANUAL_MAX_POINTS} 点`
-                    : `ch${ch} 已采 ${points} 点`}
+                  : `ch${ch} 已采 ${points} 点`}
               </span>
             </div>
           </div>

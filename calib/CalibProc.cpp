@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "Application.h"
@@ -363,7 +364,6 @@ void RefTick() {
 
 #elif defined(CONFIG_CALIB_ROLE_MANUAL)
 
-constexpr int kManualMax = 16;             // 每通道最多记录点
 constexpr int kManualMinPoints = 8;        // <8 点拒绝拟合（三次，4 点只是过拟合）
 constexpr uint32_t kManualMinSpan = 4096;  // 拟合 x 的最小跨度（码）
 
@@ -372,8 +372,9 @@ int s_cmdLen = 0;
 
 bool s_manualOn = false;
 bool s_sampling = false;       // AD 采集进行中
-uint16_t s_mx[4][kManualMax];  // AD: raw   ；DA: ideal
-uint16_t s_my[4][kManualMax];  // AD: ideal ；DA: raw
+uint16_t* s_mx[4];             // AD: raw   ；DA: ideal
+uint16_t* s_my[4];             // AD: ideal ；DA: raw
+int s_manualCap[4];
 int s_manualN[4];
 bool s_manualFitted[4];
 double s_mCoeff[4][POLY_COEFF_NUM];
@@ -383,6 +384,53 @@ int s_samplingCh = -1;
 uint16_t s_samplingIdeal = 0;
 uint32_t s_mWaitMs;
 int s_mStable;
+
+bool ManualReserve(int ch, int need) {
+    if (need <= s_manualCap[ch]) return true;
+    int cap = s_manualCap[ch] ? s_manualCap[ch] : 16;
+    while (cap < need) cap *= 2;
+    uint16_t* mx = (uint16_t*)std::malloc((std::size_t)cap * sizeof(uint16_t));
+    uint16_t* my = (uint16_t*)std::malloc((std::size_t)cap * sizeof(uint16_t));
+    if (mx == nullptr || my == nullptr) {
+        std::free(mx);
+        std::free(my);
+        return false;
+    }
+    if (s_manualN[ch] > 0) {
+        std::memcpy(mx, s_mx[ch], (std::size_t)s_manualN[ch] * sizeof(uint16_t));
+        std::memcpy(my, s_my[ch], (std::size_t)s_manualN[ch] * sizeof(uint16_t));
+    }
+    std::free(s_mx[ch]);
+    std::free(s_my[ch]);
+    s_mx[ch] = mx;
+    s_my[ch] = my;
+    s_manualCap[ch] = cap;
+    return true;
+}
+
+bool ManualAppend(int ch, uint16_t x, uint16_t y) {
+    const int n = s_manualN[ch];
+    if (!ManualReserve(ch, n + 1)) return false;
+    s_mx[ch][n] = x;
+    s_my[ch][n] = y;
+    s_manualN[ch] = n + 1;
+    s_manualFitted[ch] = false;
+    return true;
+}
+
+void ManualReset() {
+    for (int ch = 0; ch < 4; ch++) {
+        std::free(s_mx[ch]);
+        std::free(s_my[ch]);
+        s_mx[ch] = nullptr;
+        s_my[ch] = nullptr;
+        s_manualCap[ch] = 0;
+        s_manualN[ch] = 0;
+        s_manualFitted[ch] = false;
+        s_lastRaw[ch] = 0;
+        s_hasRaw[ch] = false;
+    }
+}
 
 // x/y 方向已按板型写入 s_mx/s_my，故 PolyFit 与残差公式对两种板型同一套：
 //   AD: x=raw  y=ideal → coeff 语义 ideal=f(raw) 对齐 CalibAdIdeal
@@ -400,15 +448,12 @@ void ManualFit() {
     for (int ch = 0; ch < 4; ch++) {
         int n = s_manualN[ch];
         if (n == 0) continue;
-        double xs[kManualMax];
-        double ys[kManualMax];
         double xmin = 1e18;
         double xmax = -1e18;
         for (int i = 0; i < n; i++) {
-            xs[i] = (double)s_mx[ch][i];
-            ys[i] = (double)s_my[ch][i];
-            if (xs[i] < xmin) xmin = xs[i];
-            if (xs[i] > xmax) xmax = xs[i];
+            const double x = (double)s_mx[ch][i];
+            if (x < xmin) xmin = x;
+            if (x > xmax) xmax = x;
         }
         uint32_t span = (uint32_t)(xmax - xmin);
         if (n < kManualMinPoints || span < kManualMinSpan) {
@@ -418,7 +463,7 @@ void ManualFit() {
             continue;
         }
         double coeff[POLY_COEFF_NUM];
-        if (!PolyFit(xs, ys, n, coeff)) {
+        if (!PolyFitU16(s_mx[ch], s_my[ch], n, coeff)) {
             s_manualFitted[ch] = false;
             snprintf(m, sizeof(m), "calib: mfit failed ch=%u", (unsigned)ch);
             LogError << m;
@@ -430,7 +475,7 @@ void ManualFit() {
         double sumSq = 0.0;
         int maxAt = 0;
         for (int i = 0; i < n; i++) {
-            double d = PolyEval(coeff, xs[i]) - ys[i];
+            double d = PolyEval(coeff, (double)s_mx[ch][i]) - (double)s_my[ch][i];
             sumSq += d * d;
             double ad = d < 0 ? -d : d;
             if (ad > maxRes) {
@@ -537,12 +582,7 @@ void HandleManual(const uint8_t* p, uint8_t len) {
                 LogError << "calib: error manual-busy";
                 break;
             }
-            for (int ch = 0; ch < 4; ch++) {
-                s_manualN[ch] = 0;
-                s_manualFitted[ch] = false;
-                s_lastRaw[ch] = 0;
-                s_hasRaw[ch] = false;
-            }
+            ManualReset();
             s_manualOn = true;
             LogInfo << "calib: mbegin";
             LogInfo << "calib: board " << kBoardDir;
@@ -550,12 +590,7 @@ void HandleManual(const uint8_t* p, uint8_t len) {
             LogInfo << m;
             break;
         case OP_HOST_MANUAL_ABORT:
-            for (int ch = 0; ch < 4; ch++) {
-                s_manualN[ch] = 0;
-                s_manualFitted[ch] = false;
-                s_lastRaw[ch] = 0;
-                s_hasRaw[ch] = false;
-            }
+            ManualReset();
             s_sampling = false;
             s_samplingCh = -1;
             s_manualOn = false;
@@ -600,17 +635,6 @@ void HandleManual(const uint8_t* p, uint8_t len) {
                 uint8_t ch = p[1] & 0x03;
                 uint16_t ideal = (uint16_t)(p[2] | (p[3] << 8));
                 if (kManualAd) {
-                    bool exists = false;
-                    for (int i = 0; i < s_manualN[ch]; i++) {
-                        if (s_my[ch][i] == ideal) {
-                            exists = true;
-                            break;
-                        }
-                    }
-                    if (!exists && s_manualN[ch] >= kManualMax) {
-                        LogError << "calib: error manual-full";
-                        break;
-                    }
                     s_sampling = true;
                     s_samplingCh = ch;
                     s_samplingIdeal = ideal;
@@ -640,15 +664,11 @@ void HandleManual(const uint8_t* p, uint8_t len) {
                                  (unsigned)(at + 1), (unsigned)old, (unsigned)ideal, (unsigned)raw);
                         LogInfo << m;
                     } else {
-                        if (s_manualN[ch] >= kManualMax) {
+                        int n = s_manualN[ch];
+                        if (!ManualAppend(ch, ideal, raw)) {
                             LogError << "calib: error manual-full";
                             break;
                         }
-                        int n = s_manualN[ch];
-                        s_mx[ch][n] = ideal;
-                        s_my[ch][n] = raw;
-                        s_manualN[ch] = n + 1;
-                        s_manualFitted[ch] = false;
                         s_hasRaw[ch] = false;
                         snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch,
                                  (unsigned)(n + 1), (unsigned)ideal, (unsigned)raw);
@@ -801,9 +821,10 @@ void ManualTick() {
                  (unsigned)old, (unsigned)ideal, (unsigned)median);
     } else {
         int n = s_manualN[ch];
-        s_mx[ch][n] = median;
-        s_my[ch][n] = ideal;
-        s_manualN[ch] = n + 1;
+        if (!ManualAppend(ch, median, ideal)) {
+            LogError << "calib: error manual-full";
+            return;
+        }
         snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(n + 1),
                  (unsigned)ideal, (unsigned)median);
     }

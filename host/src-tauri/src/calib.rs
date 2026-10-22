@@ -1318,6 +1318,16 @@ mod tests {
     }
 
     #[test]
+    fn manual_accepts_more_than_sixteen_points() {
+        let mut parser = Parser::new();
+        parser.feed("calib: mbegin");
+        for i in 1..=20 {
+            parser.feed(&format!("calib: mpt ch=0 n={i} ideal={} raw={}", i * 1000, i * 900));
+        }
+        assert_eq!(parser.report.manual.channels[0].points.len(), 20);
+    }
+
+    #[test]
     fn manual_replace_overwrites_same_raw_point() {
         let mut parser = Parser::new();
         parser.feed("calib: mbegin");

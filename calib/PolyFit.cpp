@@ -13,16 +13,18 @@ static double PowI(double x, int e) {
     return result;
 }
 
-bool PolyFit(const double* xs, const double* ys, int n, double* coeffOut) {
+template <typename T>
+static bool PolyFitImpl(const T* xs, const T* ys, int n, double* coeffOut) {
     if (n <= POLY_DEGREE) {
         return false;
     }
 
-    double xmin = xs[0];
-    double xmax = xs[0];
+    double xmin = (double)xs[0];
+    double xmax = (double)xs[0];
     for (int i = 1; i < n; i++) {
-        if (xs[i] < xmin) xmin = xs[i];
-        if (xs[i] > xmax) xmax = xs[i];
+        const double x = (double)xs[i];
+        if (x < xmin) xmin = x;
+        if (x > xmax) xmax = x;
     }
     const double mid = 0.5 * (xmin + xmax);
     double half = 0.5 * (xmax - xmin);
@@ -38,7 +40,7 @@ bool PolyFit(const double* xs, const double* ys, int n, double* coeffOut) {
         }
     }
     for (int s = 0; s < n; s++) {
-        const double u = (xs[s] - mid) / half;
+        const double u = ((double)xs[s] - mid) / half;
         double p[2 * POLY_DEGREE + 1];
         for (int k = 0; k <= 2 * POLY_DEGREE; k++) {
             p[k] = PowI(u, k);
@@ -47,7 +49,7 @@ bool PolyFit(const double* xs, const double* ys, int n, double* coeffOut) {
             for (int j = 0; j < nc; j++) {
                 a[i][j] += p[i + j];
             }
-            a[i][nc] += p[i] * ys[s];
+            a[i][nc] += p[i] * (double)ys[s];
         }
     }
 
@@ -113,6 +115,14 @@ bool PolyFit(const double* xs, const double* ys, int n, double* coeffOut) {
         }
     }
     return true;
+}
+
+bool PolyFit(const double* xs, const double* ys, int n, double* coeffOut) {
+    return PolyFitImpl(xs, ys, n, coeffOut);
+}
+
+bool PolyFitU16(const uint16_t* xs, const uint16_t* ys, int n, double* coeffOut) {
+    return PolyFitImpl(xs, ys, n, coeffOut);
 }
 
 double PolyEval(const double* coeff, double x) {
