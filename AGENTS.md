@@ -121,9 +121,10 @@ just download build/DA_4CH-Debug-v1.8.elf   # 仅烧录
 just run      build/DA_4CH-Debug-v1.8.elf   # 烧录并运行，日志经 RTT 打在终端（无需串口）
 just attach   build/DA_4CH-Debug-v1.8.elf   # 不下载，仅连上看 RTT 日志
 just erase | reset | info
-just all                                     # 全部板型 × 角色 × 类型 并发配置 + 构建
+just all                                     # 全部板型 × REF/DUT/MANUAL × Debug/Release 并发配置 + 构建
 just configure_all | build                   # 仅并发配置 / 仅并发构建
 just make AD_4CH DUT Debug                   # 配置并构建单个组合
+just release                                 # 全量固件（含 APP）× Debug/Release → out/firmware-v<ver>.zip + .sha256
 just watch AD_4CH DUT Debug                  # watchexec 增量重建
 ```
 

@@ -7,6 +7,8 @@ BOARDS := "AD_4CH DA_4CH"
 # 校准角色；APP 固件不在本仓库本地脚本编译
 ROLES := "REF DUT MANUAL"
 TYPES := "Debug Release"
+# 发布包需要 APP 固件；本地调试默认只编 REF/DUT/MANUAL
+RELEASE_ROLES := "APP REF DUT MANUAL"
 
 # 配置单个组合：just configure <BOARD> <ROLE> [TYPE]
 # 目录 build/<BOARD>_<ROLE>_<TYPE>
@@ -36,6 +38,33 @@ build:
 
 # 全量：并发配置 + 并发构建
 all: configure_all build
+
+# 全量固件（含 APP）× Debug/Release，打包到 out/firmware-v<MAJOR>.<MINOR>.zip
+release:
+    @set -eu; \
+    major=$(sed -n 's/^set(MAJOR \([0-9]\+\))/\1/p' CMakeLists.txt); \
+    minor=$(sed -n 's/^set(MINOR \([0-9]\+\))/\1/p' CMakeLists.txt); \
+    ver="$major.$minor"; \
+    rm -rf out/fw-build out/fw-dist out/firmware-v$ver.zip out/firmware-v$ver.zip.sha256; \
+    mkdir -p out/fw-build out/fw-dist; \
+    for t in {{TYPES}}; do \
+      for r in {{RELEASE_ROLES}}; do \
+        for b in {{BOARDS}}; do \
+          cmake -DBOARD=$b -DCALIB_ROLE=$r -DBUILD_TYPE=$t \
+                -DCMAKE_TOOLCHAIN_FILE={{toolchain}} -G Ninja -S . \
+                -B "out/fw-build/${b}-${r}-${t}" >/dev/null; \
+        done; \
+      done; \
+    done; \
+    for d in out/fw-build/*/; do \
+      cmake --build "$d"; \
+    done; \
+    find out/fw-build -maxdepth 2 -type f \( -name '*.elf' -o -name '*.hex' -o -name '*.map' \) -exec cp {} out/fw-dist/ \;; \
+    cd out/fw-dist; \
+    python3 -c 'import os,sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w",zipfile.ZIP_DEFLATED); [z.write(f,f) for f in sorted(os.listdir("."))]; z.close()' "../firmware-v${ver}.zip"; \
+    cd ..; \
+    sha256sum "firmware-v${ver}.zip" > "firmware-v${ver}.zip.sha256"; \
+    ls -lh "firmware-v${ver}.zip" "firmware-v${ver}.zip.sha256"
 
 # 配置并构建单个组合：just make <BOARD> <ROLE> [TYPE]
 make board role type="Debug":
