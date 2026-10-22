@@ -20,9 +20,25 @@ env:
   BUILD_TYPES: Debug Release
 
 jobs:
+  # 先建草稿 Release；构建产物直接传 Release，不占 Actions artifact 存储
+  prepare:
+    name: prepare release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reset draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          gh release delete "${tag}" --yes || true
+          gh release create "${tag}" --draft --title "${tag}" --generate-notes
+
   # 固件是交叉编译产物，与构建主机平台无关：单平台构建一次，出一个 zip
   firmware:
     name: firmware
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,20 +86,19 @@ jobs:
           sha256sum "firmware-${ver}.zip" > "firmware-${ver}.zip.sha256"
           ls -l firmware-*.zip*
 
-      # 仅 tag 上传 artifact（release 用）；main/PR 只验证构建，避免占满 artifact 配额
-      - uses: actions/upload-artifact@v4
+      - name: Upload firmware assets to release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          name: firmware
-          path: |
-            firmware-*.zip
-            firmware-*.zip.sha256
-          if-no-files-found: error
-          retention-days: 3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${GITHUB_REF_NAME}" firmware-*.zip firmware-*.zip.sha256 --clobber
 
   # 桌面上位机是原生程序，按平台各出一套安装包
   desktop:
     name: desktop (${{ matrix.os }} / ${{ matrix.app }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -128,48 +143,29 @@ jobs:
         working-directory: ${{ matrix.app }}/src-tauri/target/release/bundle
         run: find . -maxdepth 2 -type f | sort
 
-      # 同上：仅 tag 上传，main/PR 不占 artifact 配额
-      - uses: actions/upload-artifact@v4
+      - name: Upload desktop bundles to release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          name: desktop-${{ matrix.os }}-${{ matrix.app }}
-          path: |
-            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.deb
-            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.rpm
-            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.AppImage
-            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.dmg
-            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*.msi
-            ${{ matrix.app }}/src-tauri/target/release/bundle/*/*-setup.exe
-          if-no-files-found: error
-          retention-days: 3
-
-  release:
-    name: release
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [firmware, desktop]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      # 重打同一 tag 时先清掉旧 Release（含陈旧附件），否则会留下上次的错误产物
-      - name: Remove stale release
+        shell: bash
+        working-directory: ${{ matrix.app }}/src-tauri/target/release/bundle
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release delete "${GITHUB_REF_NAME}" --yes --cleanup-tag=false || true
-
-      - name: Collect assets
         run: |
           set -euo pipefail
-          mkdir -p out
-          find artifacts -type f \
-            \( -name '*.zip' -o -name '*.sha256' -o -name '*.deb' -o -name '*.rpm' \
-               -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
-            -exec cp {} out/ \;
-          ls -l out
+          shopt -s nullglob
+          files=(*/*.deb */*.rpm */*.AppImage */*.dmg */*.msi */*-setup.exe)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no desktop bundles found" >&2
+            exit 1
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: out/*
-          generate_release_notes: true
+  publish:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, firmware, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
