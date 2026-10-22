@@ -75,6 +75,13 @@ fn connect(
     let Some(name) = name else {
         return Err(format!("未找到探针 #{probe_index}"));
     };
+    // 新会话不清空会被上一块板的角色/手动会话状态污染（例如 MANUAL → APP 后仍显示可手动校准）
+    let report = {
+        let mut parser = state.parser.lock();
+        *parser = Parser::new();
+        parser.report.clone()
+    };
+    let _ = app.emit("calib://report", report);
     let stop = Arc::new(AtomicBool::new(false));
     state.commands.lock().clear();
     let handle = rtt::spawn_worker(

@@ -45,6 +45,14 @@ pub struct ManualPoint {
 }
 
 #[derive(Clone, Default, Serialize)]
+pub struct ManualReplace {
+    pub ch: usize,
+    pub n: usize,
+    pub old: u16,
+    pub ideal: u16,
+}
+
+#[derive(Clone, Default, Serialize)]
 pub struct ManualChannel {
     pub ch: usize,
     pub points: Vec<ManualPoint>,
@@ -52,11 +60,15 @@ pub struct ManualChannel {
     pub resid: Option<Stat>,
     pub verify: Option<Stat>,
     pub fitted: bool,
+    /// DA 方向已写入、尚未被采点消费的 raw；采点后清空
+    pub pending_raw: Option<u16>,
 }
 
 #[derive(Clone, Default, Serialize)]
 pub struct ManualReport {
     pub on: bool,
+    pub sampling_ch: Option<usize>,
+    pub last_replace: Option<ManualReplace>,
     pub channels: Vec<ManualChannel>,
     pub saved: bool,
     pub verify_pass: Option<bool>,
@@ -148,6 +160,16 @@ static REF_WARN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^ref warn ch=(\d+) not calibrated$").unwrap());
 static MPT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^mpt ch=(\d+) n=(\d+) ideal=(\d+) raw=(\d+)$").unwrap());
+static MREP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^mrep ch=(\d+) n=(\d+) old=(\d+) ideal=(\d+) raw=(\d+)$").unwrap()
+});
+static MSAMPLE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^msample ch=(\d+) ideal=(\d+)$").unwrap());
+static MSET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^mset ch=(\d+) raw=(\d+)$").unwrap());
+static MCOEFF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^mcoeff ch=(\d+) ([-0-9.eE+]+) ([-0-9.eE+]+) ([-0-9.eE+]+) ([-0-9.eE+]+)$").unwrap()
+});
+static MFIT_ERR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^mfit \S+ ch=(\d+)").unwrap());
 static MRES_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^mres ch=(\d+) n=(\d+) max=([-0-9.eE+]+) @ideal=(\d+) rmse=([-0-9.eE+]+)$").unwrap()
 });
@@ -219,6 +241,8 @@ impl Default for Parser {
 fn fresh_manual() -> ManualReport {
     ManualReport {
         on: false,
+        sampling_ch: None,
+        last_replace: None,
         channels: (0..CHANNELS)
             .map(|ch| ManualChannel {
                 ch,
@@ -336,10 +360,27 @@ impl Parser {
             if role == "DUT" {
                 self.report.phase = "sweep".to_string();
             }
-            if role == "MANUAL" {
-                self.report.manual.on = true;
+            // role 行只表示固件角色；MANUAL 会话是否开始由 `manual on|off` 明确上报
+            if role != "MANUAL" {
+                self.report.manual = fresh_manual();
             }
             self.report.role = Some(role);
+            return true;
+        }
+
+        if let Some(v) = rest.strip_prefix("manual ") {
+            match v.trim() {
+                "on" => {
+                    self.report.manual.on = true;
+                    self.report.manual.sampling_ch = None;
+                    self.report.phase = "manual".to_string();
+                }
+                "off" => {
+                    self.report.manual = fresh_manual();
+                    self.report.phase = "manual".to_string();
+                }
+                _ => return false,
+            }
             return true;
         }
 
@@ -387,12 +428,25 @@ impl Parser {
             return true;
         }
         if rest == "mabort" {
-            self.report.manual.on = false;
+            self.report.manual = fresh_manual();
             self.report.phase = "manual".to_string();
             return true;
         }
-        if rest.starts_with("mset ch=") {
-            return false;
+        if let Some(c) = MSAMPLE_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            self.report.manual.sampling_ch = if ch < CHANNELS { Some(ch) } else { None };
+            self.report.manual.last_replace = None;
+            self.report.phase = "manual".to_string();
+            return true;
+        }
+        if let Some(c) = MSET_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch < CHANNELS {
+                self.report.manual.channels[ch].pending_raw = Some(parse_u16(&c[2]));
+            }
+            self.report.manual.last_replace = None;
+            self.report.phase = "manual".to_string();
+            return true;
         }
         if let Some(c) = MPT_RE.captures(rest) {
             let ch = parse_u16(&c[1]) as usize;
@@ -406,7 +460,42 @@ impl Parser {
                 let mc = &mut self.report.manual.channels[ch];
                 mc.points.push(point);
                 mc.fitted = false;
+                mc.coeff = None;
+                mc.resid = None;
+                mc.verify = None;
+                mc.pending_raw = None;
             }
+            self.report.manual.sampling_ch = None;
+            self.report.manual.last_replace = None;
+            self.report.manual.saved = false;
+            self.report.manual.verify_pass = None;
+            self.report.phase = "manual".to_string();
+            return true;
+        }
+        if let Some(c) = MREP_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            let n = parse_u16(&c[2]) as usize;
+            let old = parse_u16(&c[3]);
+            let ideal = parse_u16(&c[4]);
+            let raw = parse_u16(&c[5]);
+            if ch < CHANNELS {
+                let mc = &mut self.report.manual.channels[ch];
+                if let Some(p) = mc.points.iter_mut().find(|p| p.n == n) {
+                    p.ideal = ideal;
+                    p.raw = raw;
+                } else {
+                    mc.points.push(ManualPoint { ch, n, ideal, raw });
+                }
+                mc.fitted = false;
+                mc.coeff = None;
+                mc.resid = None;
+                mc.verify = None;
+                mc.pending_raw = None;
+            }
+            self.report.manual.sampling_ch = None;
+            self.report.manual.last_replace = Some(ManualReplace { ch, n, old, ideal });
+            self.report.manual.saved = false;
+            self.report.manual.verify_pass = None;
             self.report.phase = "manual".to_string();
             return true;
         }
@@ -419,12 +508,36 @@ impl Parser {
                     rmse: parse_f64(&c[5]),
                 });
                 mc.fitted = true;
+                mc.verify = None;
             }
+            self.report.manual.saved = false;
+            self.report.manual.verify_pass = None;
             self.report.phase = "manual".to_string();
             return true;
         }
-        if rest.starts_with("mfit reject ch=") || rest.starts_with("mfit failed ch=") {
+        if let Some(c) = MCOEFF_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            if ch < CHANNELS {
+                self.report.manual.channels[ch].coeff = Some([
+                    parse_f64(&c[2]),
+                    parse_f64(&c[3]),
+                    parse_f64(&c[4]),
+                    parse_f64(&c[5]),
+                ]);
+            }
+            return true;
+        }
+        if rest.starts_with("mfit reject") || rest.starts_with("mfit resid") || rest.starts_with("mfit failed") {
+            if let Some(c) = MFIT_ERR_RE.captures(rest) {
+                let ch = parse_u16(&c[1]) as usize;
+                if ch < CHANNELS {
+                    let mc = &mut self.report.manual.channels[ch];
+                    mc.fitted = false;
+                    mc.coeff = None;
+                }
+            }
             self.report.manual.errors.push(rest.to_string());
+            self.report.phase = "manual".to_string();
             return true;
         }
         if rest == "msaved" {
@@ -454,10 +567,20 @@ impl Parser {
             return true;
         }
         if let Some(err) = rest.strip_prefix("error manual-") {
-            if err == "off" || err == "busy" || err == "full" || err == "no-fit" {
+            if err == "off"
+                || err == "busy"
+                || err == "full"
+                || err == "no-fit"
+                || err == "no-raw"
+                || err == "no-points"
+            {
                 self.report.manual.errors.push(rest.to_string());
                 return true;
             }
+        }
+        if rest == "error bad-op" && self.report.role.as_deref() == Some("MANUAL") {
+            self.report.manual.errors.push(rest.to_string());
+            return true;
         }
 
         if rest == "reset" {
@@ -1108,7 +1231,8 @@ mod tests {
         assert_eq!(parser.report.phase, "manual");
         assert_eq!(parser.report.manual.channels.len(), CHANNELS);
 
-        assert!(!parser.feed("calib: mset ch=0 raw=1000"));
+        assert!(parser.feed("calib: mset ch=0 raw=1000"));
+        assert_eq!(parser.report.manual.channels[0].pending_raw, Some(1000));
 
         for n in 0..5u16 {
             let ideal = 1000 * (n + 1);
@@ -1118,10 +1242,16 @@ mod tests {
         assert_eq!(parser.report.manual.channels[0].points.len(), 5);
         assert_eq!(parser.report.manual.channels[0].points[4].ideal, 5000);
         assert_eq!(parser.report.manual.channels[0].points[4].raw, 4500);
+        assert_eq!(parser.report.manual.channels[0].pending_raw, None);
 
         assert!(parser.feed("calib: mres ch=0 n=5 max=1.5 @ideal=5000 rmse=0.5"));
         assert!(parser.report.manual.channels[0].fitted);
         assert_eq!(parser.report.manual.channels[0].resid.as_ref().unwrap().max, 1.5);
+        assert!(parser.feed("calib: mcoeff ch=0 1.25 0.5 -0.0001 2e-9"));
+        assert_eq!(
+            parser.report.manual.channels[0].coeff,
+            Some([1.25, 0.5, -0.0001, 2e-9])
+        );
 
         assert!(parser.feed("calib: msaved"));
         assert!(parser.report.manual.saved);
@@ -1140,6 +1270,41 @@ mod tests {
     }
 
     #[test]
+    fn manual_role_is_not_a_session() {
+        let mut parser = Parser::new();
+        assert!(parser.feed("calib: role MANUAL"));
+        assert_eq!(parser.report.role.as_deref(), Some("MANUAL"));
+        assert!(!parser.report.manual.on, "role 行不得开启手动会话");
+        assert!(parser.feed("calib: manual off"));
+        assert!(parser.feed("calib: mbegin"));
+        assert!(parser.report.manual.on);
+
+        assert!(parser.feed("calib: mset ch=1 raw=2000"));
+        assert!(parser.feed("calib: msample ch=1 ideal=100"));
+        assert_eq!(parser.report.manual.sampling_ch, Some(1));
+        assert!(parser.feed("calib: mpt ch=1 n=1 ideal=100 raw=90"));
+        assert_eq!(parser.report.manual.sampling_ch, None);
+        assert_eq!(parser.report.manual.channels[1].points.len(), 1);
+
+        assert!(parser.feed("calib: manual off"));
+        assert!(!parser.report.manual.on);
+        assert!(parser.report.manual.channels[1].points.is_empty());
+    }
+
+    #[test]
+    fn manual_residual_reject_unfits_channel() {
+        let mut parser = Parser::new();
+        parser.feed("calib: mbegin");
+        parser.feed("calib: mres ch=2 n=9 max=1.0 @ideal=0 rmse=0.5");
+        assert!(parser.report.manual.channels[2].fitted);
+        assert!(parser.feed("calib: mfit resid ch=2 max=31.0 limit=20.0"));
+        assert!(!parser.report.manual.channels[2].fitted);
+        assert_eq!(parser.report.manual.errors.len(), 1);
+        assert!(parser.feed("calib: error manual-no-raw"));
+        assert_eq!(parser.report.manual.errors.len(), 2);
+    }
+
+    #[test]
     fn manual_reject_keeps_points() {
         let mut parser = Parser::new();
         parser.feed("calib: mbegin");
@@ -1150,6 +1315,48 @@ mod tests {
         assert!(!parser.report.manual.channels[0].fitted);
         assert_eq!(parser.report.manual.errors.len(), 1);
         assert_eq!(parser.report.phase, "manual");
+    }
+
+    #[test]
+    fn manual_replace_overwrites_same_raw_point() {
+        let mut parser = Parser::new();
+        parser.feed("calib: mbegin");
+        parser.feed("calib: mset ch=0 raw=32768");
+        parser.feed("calib: mpt ch=0 n=1 ideal=20000 raw=32768");
+        parser.feed("calib: mres ch=0 n=1 max=1.0 @ideal=20000 rmse=0.5");
+        parser.feed("calib: mcoeff ch=0 1 2 3 4");
+        assert_eq!(parser.report.manual.channels[0].points.len(), 1);
+
+        parser.feed("calib: mset ch=0 raw=32768");
+        parser.feed("calib: mrep ch=0 n=1 old=20000 ideal=21000 raw=32768");
+        let m = &parser.report.manual;
+        let c = &m.channels[0];
+        assert_eq!(c.points.len(), 1);
+        assert_eq!(c.points[0].ideal, 21000);
+        assert_eq!(c.points[0].raw, 32768);
+        assert!(!c.fitted);
+        assert!(c.coeff.is_none());
+        assert_eq!(c.pending_raw, None);
+        let rep = m.last_replace.as_ref().unwrap();
+        assert_eq!((rep.ch, rep.n, rep.old, rep.ideal), (0, 1, 20000, 21000));
+    }
+
+    #[test]
+    fn manual_replace_overwrites_same_ideal_point() {
+        let mut parser = Parser::new();
+        parser.feed("calib: mbegin");
+        parser.feed("calib: mpt ch=0 n=1 ideal=1000 raw=900");
+        parser.feed("calib: msample ch=0 ideal=1000");
+        assert_eq!(parser.report.manual.sampling_ch, Some(0));
+
+        parser.feed("calib: mrep ch=0 n=1 old=900 ideal=1000 raw=950");
+        let m = &parser.report.manual;
+        let c = &m.channels[0];
+        assert_eq!(c.points.len(), 1);
+        assert_eq!(c.points[0].ideal, 1000);
+        assert_eq!(c.points[0].raw, 950);
+        assert_eq!(m.sampling_ch, None);
+        assert_eq!(m.last_replace.as_ref().unwrap().old, 900);
     }
 
     #[test]

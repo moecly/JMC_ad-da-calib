@@ -66,7 +66,7 @@ extern "C" {
 #endif
 
 #ifndef CONFIG_MINOR_VERSION
-#define CONFIG_MINOR_VERSION        (12)
+#define CONFIG_MINOR_VERSION        (13)
 #endif
 
 #if defined(__cplusplus)

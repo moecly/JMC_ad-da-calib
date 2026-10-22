@@ -60,10 +60,13 @@ export interface ManualChannel {
   resid: Stat | null;
   verify: Stat | null;
   fitted: boolean;
+  pending_raw: number | null;
 }
 
 export interface ManualReport {
   on: boolean;
+  sampling_ch: number | null;
+  last_replace: { ch: number; n: number; old: number; ideal: number } | null;
   channels: ManualChannel[];
   saved: boolean;
   verify_pass: boolean | null;

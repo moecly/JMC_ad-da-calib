@@ -2,9 +2,13 @@ import { useState } from "react";
 import type { CalibReport } from "../types";
 import type { CalibParamsCtl } from "../hooks/useCalibParams";
 import * as api from "../lib/ipc";
+import { ManualChart } from "./ManualChart";
 import { Button, Card, CardTitle, Field, Input, Pill, Select } from "./ui";
 
 const clamp = (v: number) => Math.max(0, Math.min(65535, v));
+
+const MANUAL_MAX_POINTS = 16;
+const MANUAL_MIN_POINTS = 8;
 
 const boardLabel = (dir: string | null) => (dir === "ad" ? "AD 采集板" : dir === "da" ? "DA 输出板" : "?");
 
@@ -25,7 +29,15 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
   const boardDir = report?.board_dir ?? null;
   const inManual = manual?.on ?? false;
   const channel = manual?.channels[ch];
-  const fitted = channel?.fitted ?? false;
+  const replaced = manual?.last_replace && manual.last_replace.ch === ch ? manual.last_replace : null;
+  const replacedPoint = replaced ? (channel?.points ?? []).find((p) => p.n === replaced.n) ?? null : null;
+  const points = channel?.points.length ?? 0;
+  const full = points >= MANUAL_MAX_POINTS;
+  const pendingRaw = channel?.pending_raw ?? null;
+  const replaceAt = pendingRaw !== null ? (channel?.points.find((p) => p.raw === pendingRaw) ?? null) : null;
+  const samplingCh = manual?.sampling_ch ?? null;
+  const anyPoints = (manual?.channels ?? []).some((c) => c.points.length > 0);
+  const fittedChs = (manual?.channels ?? []).filter((c) => c.fitted).map((c) => c.ch);
   const isManualFw = report?.role === "MANUAL";
   const ready = connected && isManualFw && inManual;
 
@@ -43,6 +55,7 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
     mode === "code"
       ? clamp(Math.round(Number(value) || 0))
       : clamp(Math.round(((Number(value) || 0) / vfsNum) * 65535));
+  const adReplaceAt = channel?.points.find((p) => p.ideal === ideal) ?? null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -109,7 +122,7 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
             <Select value={ch} disabled={!ready} onChange={(e) => setCh(Number(e.currentTarget.value))}>
               {[0, 1, 2, 3].map((c) => (
                 <option key={c} value={c}>
-                  ch{c}（{manual?.channels[c]?.points.length ?? 0} 点）
+                  ch{c}（{manual?.channels[c]?.points.length ?? 0}/{MANUAL_MAX_POINTS} 点）
                 </option>
               ))}
             </Select>
@@ -131,9 +144,24 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
                 <Input className="w-24" value={value} disabled={!ready} onChange={(e) => setValue(e.currentTarget.value)} />
               </Field>
               <span className="font-mono tabular-nums text-xs text-ink-faint">ideal={ideal}</span>
-              <Button size="sm" disabled={!ready} onClick={() => run(() => api.manualAdd(ch, ideal))}>
+              <Button
+                size="sm"
+                disabled={!ready || samplingCh !== null || (adReplaceAt === null && full)}
+                onClick={() => run(() => api.manualAdd(ch, ideal))}
+              >
                 采集点
               </Button>
+              <span className={`text-xs ${full || adReplaceAt !== null ? "text-warn-ink" : "text-ink-faint"}`}>
+                {samplingCh !== null
+                  ? `采集中 ch${samplingCh}…（完成后自动出点并刷新曲线）`
+                  : adReplaceAt !== null
+                    ? `ideal=${ideal} 已存在，采点将覆盖第 ${adReplaceAt.n} 点`
+                    : full
+                      ? `ch${ch} 已满 ${MANUAL_MAX_POINTS} 点`
+                      : points < MANUAL_MIN_POINTS
+                        ? `ch${ch} 已采 ${points} 点，至少 ${MANUAL_MIN_POINTS} 点且跨度 ≥ 4096 才能拟合`
+                        : `ch${ch} 已采 ${points} 点`}
+              </span>
             </div>
           </div>
         ) : (
@@ -145,27 +173,49 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
               <Button size="sm" disabled={!ready} onClick={() => run(() => api.manualSetRaw(ch, clamp(Number(raw) || 0)))}>
                 写入
               </Button>
+              <span className={`text-xs ${pendingRaw !== null ? "text-accent" : "text-ink-faint"}`}>
+                {pendingRaw !== null ? `已写入 raw=${pendingRaw}，待采点` : "每点先写 raw，再录实测值采点"}
+              </span>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Field label={mode === "volt" ? "实测电压" : "实测码"} suffix={mode === "volt" ? "V" : ""}>
                 <Input className="w-24" value={value} disabled={!ready} onChange={(e) => setValue(e.currentTarget.value)} />
               </Field>
               <span className="font-mono tabular-nums text-xs text-ink-faint">ideal={ideal}</span>
-              <Button size="sm" disabled={!ready} onClick={() => run(() => api.manualAdd(ch, ideal))}>
+              <Button
+                size="sm"
+                disabled={!ready || samplingCh !== null || pendingRaw === null || (replaceAt === null && full)}
+                onClick={() => run(() => api.manualAdd(ch, ideal))}
+              >
                 采集点
               </Button>
+              <span className={`text-xs ${full || replaceAt !== null ? "text-warn-ink" : "text-ink-faint"}`}>
+                {replaceAt !== null
+                  ? `raw=${pendingRaw} 已存在，采点将覆盖第 ${replaceAt.n} 点`
+                  : full
+                    ? `ch${ch} 已满 ${MANUAL_MAX_POINTS} 点`
+                    : `ch${ch} 已采 ${points} 点`}
+              </span>
             </div>
           </div>
         )}
 
+        {replaced && (
+          <div className="mt-2 text-xs text-warn-ink">
+            {boardDir === "ad"
+              ? `已覆盖 ch${replaced.ch} 第 ${replaced.n} 点（ideal=${replaced.ideal}）：raw ${replaced.old} → ${replacedPoint?.raw ?? "—"}`
+              : `已覆盖 ch${replaced.ch} 第 ${replaced.n} 点：ideal ${replaced.old} → ${replacedPoint?.ideal ?? replaced.ideal}`}
+          </div>
+        )}
+
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <Button size="sm" disabled={!ready} onClick={() => run(api.manualFit)}>
+          <Button size="sm" disabled={!ready || !anyPoints} onClick={() => run(api.manualFit)}>
             拟合
           </Button>
           <Button
             variant="primary"
             size="sm"
-            disabled={!ready || !fitted}
+            disabled={!ready || fittedChs.length === 0}
             onClick={() =>
               run(async () => {
                 await ctl.apply();
@@ -175,6 +225,9 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
           >
             写入 Flash
           </Button>
+          {fittedChs.length > 0 && (
+            <span className="text-xs text-ink-soft">将写入 ch{fittedChs.join(", ch")}</span>
+          )}
           {channel?.resid && (
             <span className="font-mono tabular-nums text-xs text-ink-soft">
               残差 max={channel.resid.max.toFixed(2)} rmse={channel.resid.rmse.toFixed(2)}
@@ -184,6 +237,8 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
 
         {error && <div className="mt-3 text-xs text-danger-ink">{error}</div>}
       </Card>
+
+      <ManualChart report={report} ch={ch} boardDir={boardDir} />
 
       {manual && manual.errors.length > 0 && (
         <Card>
@@ -198,6 +253,11 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
 
       <Card>
         <CardTitle>采样点 · ch{ch}</CardTitle>
+        <div className="mb-2 text-xs text-ink-faint">
+          {boardDir === "ad"
+            ? "AD 以施加 ideal 为键：同一 ideal 再采会覆盖该点 raw"
+            : "DA 以写入 raw 为键：同一 raw 再采会覆盖该点 ideal"}
+        </div>
         {(channel?.points.length ?? 0) === 0 ? (
           <div className="text-xs text-ink-faint">暂无采样点</div>
         ) : (
@@ -252,7 +312,7 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
                       {c.verify ? `${c.verify.max.toFixed(2)} / ${c.verify.rmse.toFixed(2)}` : "—"}
                     </td>
                     <td className="px-3 py-2 font-mono text-ink-soft">
-                      {c.coeff ? c.coeff.map((v) => v.toFixed(6)).join(", ") : "—"}
+                      {c.coeff ? c.coeff.map((v) => String(v)).join(", ") : "—"}
                     </td>
                   </tr>
                 ))}

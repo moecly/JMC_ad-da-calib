@@ -27,12 +27,10 @@ export function useBackend() {
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
-    let lastState = "";
     (async () => {
       const snapshot = await api.getSnapshot();
       if (disposed) return;
       setStatus(snapshot.status);
-      lastState = snapshot.status.state;
       setReport(snapshot.report);
       setProbeName(snapshot.probe_name);
       setLines(snapshot.lines.slice(-MAX_LINES));
@@ -42,11 +40,10 @@ export function useBackend() {
         await api.onStatus((status) => {
           setStatus(status);
           if (status.state === "disconnected") setProbeName(null);
-          // 附着成功时拉一次设备/板型/REF 信息，供概览卡展示
-          if (status.connected && status.state === "attached" && lastState !== "attached") {
+          // 每次附着（含复位后重建 RTT、手动会话被清）都拉一次设备/角色/会话状态
+          if (status.connected && status.state === "attached") {
             void api.calibStatus().catch(() => {});
           }
-          lastState = status.state;
         }),
       );
     })();

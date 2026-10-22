@@ -378,6 +378,7 @@ int s_manualN[4];
 bool s_manualFitted[4];
 double s_mCoeff[4][POLY_COEFF_NUM];
 uint16_t s_lastRaw[4];  // DA: 最近一次写入的原始码
+bool s_hasRaw[4];       // DA: 该通道写码后尚未被采点消费
 int s_samplingCh = -1;
 uint16_t s_samplingIdeal = 0;
 uint32_t s_mWaitMs;
@@ -388,6 +389,14 @@ int s_mStable;
 //   DA: x=ideal y=raw  → coeff 语义 raw=f(ideal) 对齐 CalibDaRaw
 void ManualFit() {
     char m[96];
+    bool any = false;
+    for (int ch = 0; ch < 4; ch++) {
+        if (s_manualN[ch] > 0) any = true;
+    }
+    if (!any) {
+        LogError << "calib: error manual-no-points";
+        return;
+    }
     for (int ch = 0; ch < 4; ch++) {
         int n = s_manualN[ch];
         if (n == 0) continue;
@@ -433,6 +442,19 @@ void ManualFit() {
         snprintf(m, sizeof(m), "calib: mres ch=%u n=%u max=%.1f @ideal=%u rmse=%.1f", (unsigned)ch, (unsigned)n, maxRes,
                  (unsigned)idealAt, sqrt(sumSq / n));
         LogInfo << m;
+        // 与自动流程一致：残差超限不落盘。手动采点无法自动重测，只能由操作员补点或放宽 resid 参数
+        if (maxRes > s_residualLimit) {
+            s_manualFitted[ch] = false;
+            snprintf(m, sizeof(m), "calib: mfit resid ch=%u max=%.1f limit=%.1f", (unsigned)ch, maxRes, s_residualLimit);
+            LogError << m;
+            continue;
+        }
+        char cm[128];
+        int cn = snprintf(cm, sizeof(cm), "calib: mcoeff ch=%u", (unsigned)ch);
+        for (int k = 0; k < POLY_COEFF_NUM; k++) {
+            cn += snprintf(cm + cn, sizeof(cm) - cn, " %.9g", coeff[k]);
+        }
+        LogInfo << cm;
     }
 }
 
@@ -519,6 +541,7 @@ void HandleManual(const uint8_t* p, uint8_t len) {
                 s_manualN[ch] = 0;
                 s_manualFitted[ch] = false;
                 s_lastRaw[ch] = 0;
+                s_hasRaw[ch] = false;
             }
             s_manualOn = true;
             LogInfo << "calib: mbegin";
@@ -530,6 +553,8 @@ void HandleManual(const uint8_t* p, uint8_t len) {
             for (int ch = 0; ch < 4; ch++) {
                 s_manualN[ch] = 0;
                 s_manualFitted[ch] = false;
+                s_lastRaw[ch] = 0;
+                s_hasRaw[ch] = false;
             }
             s_sampling = false;
             s_samplingCh = -1;
@@ -551,6 +576,7 @@ void HandleManual(const uint8_t* p, uint8_t len) {
                 uint16_t raw = (uint16_t)(p[2] | (p[3] << 8));
                 Bd().CalibDaSet(ch, raw);
                 s_lastRaw[ch] = raw;
+                s_hasRaw[ch] = true;
                 snprintf(m, sizeof(m), "calib: mset ch=%u raw=%u", (unsigned)ch, (unsigned)raw);
                 LogInfo << m;
             } else {
@@ -573,25 +599,61 @@ void HandleManual(const uint8_t* p, uint8_t len) {
             {
                 uint8_t ch = p[1] & 0x03;
                 uint16_t ideal = (uint16_t)(p[2] | (p[3] << 8));
-                if (s_manualN[ch] >= kManualMax) {
-                    LogError << "calib: error manual-full";
-                    break;
-                }
                 if (kManualAd) {
+                    bool exists = false;
+                    for (int i = 0; i < s_manualN[ch]; i++) {
+                        if (s_my[ch][i] == ideal) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists && s_manualN[ch] >= kManualMax) {
+                        LogError << "calib: error manual-full";
+                        break;
+                    }
                     s_sampling = true;
                     s_samplingCh = ch;
                     s_samplingIdeal = ideal;
                     s_mWaitMs = 0;
                     s_mStable = 0;
-                } else {
-                    int n = s_manualN[ch];
-                    s_mx[ch][n] = ideal;
-                    s_my[ch][n] = s_lastRaw[ch];
-                    s_manualN[ch] = n + 1;
-                    s_manualFitted[ch] = false;
-                    snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(n + 1),
-                             (unsigned)ideal, (unsigned)s_lastRaw[ch]);
+                    snprintf(m, sizeof(m), "calib: msample ch=%u ideal=%u", (unsigned)ch, (unsigned)ideal);
                     LogInfo << m;
+                } else {
+                    if (!s_hasRaw[ch]) {
+                        LogError << "calib: error manual-no-raw";
+                        break;
+                    }
+                    uint16_t raw = s_lastRaw[ch];
+                    int at = -1;
+                    for (int i = 0; i < s_manualN[ch]; i++) {
+                        if (s_my[ch][i] == raw) {
+                            at = i;
+                            break;
+                        }
+                    }
+                    if (at >= 0) {
+                        uint16_t old = s_mx[ch][at];
+                        s_mx[ch][at] = ideal;
+                        s_manualFitted[ch] = false;
+                        s_hasRaw[ch] = false;
+                        snprintf(m, sizeof(m), "calib: mrep ch=%u n=%u old=%u ideal=%u raw=%u", (unsigned)ch,
+                                 (unsigned)(at + 1), (unsigned)old, (unsigned)ideal, (unsigned)raw);
+                        LogInfo << m;
+                    } else {
+                        if (s_manualN[ch] >= kManualMax) {
+                            LogError << "calib: error manual-full";
+                            break;
+                        }
+                        int n = s_manualN[ch];
+                        s_mx[ch][n] = ideal;
+                        s_my[ch][n] = raw;
+                        s_manualN[ch] = n + 1;
+                        s_manualFitted[ch] = false;
+                        s_hasRaw[ch] = false;
+                        snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch,
+                                 (unsigned)(n + 1), (unsigned)ideal, (unsigned)raw);
+                        LogInfo << m;
+                    }
                 }
             }
             break;
@@ -632,6 +694,7 @@ void HandleManual(const uint8_t* p, uint8_t len) {
         case OP_HOST_STATUS:
             PrintDevice();
             LogInfo << "calib: role MANUAL";
+            LogInfo << (s_manualOn ? "calib: manual on" : "calib: manual off");
             LogInfo << "calib: board " << kBoardDir;
             snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
             LogInfo << m;
@@ -720,15 +783,30 @@ void ManualTick() {
     }
     uint16_t median = (uint16_t)MedianWin(s_measWin[0], s_stableTarget);
     int ch = s_samplingCh;
-    int n = s_manualN[ch];
-    s_mx[ch][n] = median;
-    s_my[ch][n] = s_samplingIdeal;
-    s_manualN[ch] = n + 1;
+    uint16_t ideal = s_samplingIdeal;
+    int at = -1;
+    for (int i = 0; i < s_manualN[ch]; i++) {
+        if (s_my[ch][i] == ideal) {
+            at = i;
+            break;
+        }
+    }
     s_manualFitted[ch] = false;
     s_sampling = false;
     char m[80];
-    snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(n + 1),
-             (unsigned)s_samplingIdeal, (unsigned)median);
+    if (at >= 0) {
+        uint16_t old = s_mx[ch][at];
+        s_mx[ch][at] = median;
+        snprintf(m, sizeof(m), "calib: mrep ch=%u n=%u old=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(at + 1),
+                 (unsigned)old, (unsigned)ideal, (unsigned)median);
+    } else {
+        int n = s_manualN[ch];
+        s_mx[ch][n] = median;
+        s_my[ch][n] = ideal;
+        s_manualN[ch] = n + 1;
+        snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(n + 1),
+                 (unsigned)ideal, (unsigned)median);
+    }
     LogInfo << m;
 #endif
 }
@@ -1984,13 +2062,15 @@ void CalibProcInit() {
 #if defined(CONFIG_CALIB_ROLE_MANUAL)
     PrintDevice();
     LogInfo << "calib: role MANUAL";
+    LogInfo << "calib: manual off";
     LogInfo << "calib: board " << kBoardDir;
-    CalibStoreLoad(&s_rec);
+    bool loaded = CalibStoreLoad(&s_rec);
     {
         char m[48];
         snprintf(m, sizeof(m), "calib: mask 0x%X", (unsigned)s_rec.validMask);
         LogInfo << m;
     }
+    if (loaded) LogInfo << "calib: loaded";
 #else
 #if defined(CONFIG_CALIB_ROLE_REF)
     LogInfo << "calib: role REF ready";
