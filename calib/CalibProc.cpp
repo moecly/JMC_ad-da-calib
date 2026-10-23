@@ -677,6 +677,93 @@ void HandleManual(const uint8_t* p, uint8_t len) {
                 }
             }
             break;
+        case OP_HOST_MANUAL_IMPORT:
+            if (!s_manualOn) {
+                LogError << "calib: error manual-off";
+                break;
+            }
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+                break;
+            }
+            if (len < 6) {
+                LogError << "calib: error bad-op";
+                break;
+            }
+            {
+                uint8_t ch = p[1] & 0x03;
+                uint16_t ideal = (uint16_t)(p[2] | (p[3] << 8));
+                uint16_t raw = (uint16_t)(p[4] | (p[5] << 8));
+                // 导入点与实测点共用同一套轴向与覆盖键：AD x=raw/y=ideal，DA x=ideal/y=raw
+                uint16_t x = kManualAd ? raw : ideal;
+                uint16_t y = kManualAd ? ideal : raw;
+                int at = -1;
+                for (int i = 0; i < s_manualN[ch]; i++) {
+                    if (s_my[ch][i] == y) {
+                        at = i;
+                        break;
+                    }
+                }
+                s_manualFitted[ch] = false;
+                if (at >= 0) {
+                    uint16_t old = s_mx[ch][at];
+                    s_mx[ch][at] = x;
+                    snprintf(m, sizeof(m), "calib: mrep ch=%u n=%u old=%u ideal=%u raw=%u", (unsigned)ch,
+                             (unsigned)(at + 1), (unsigned)old, (unsigned)ideal, (unsigned)raw);
+                } else {
+                    int n = s_manualN[ch];
+                    if (!ManualAppend(ch, x, y)) {
+                        LogError << "calib: error manual-full";
+                        break;
+                    }
+                    snprintf(m, sizeof(m), "calib: mpt ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(n + 1),
+                             (unsigned)ideal, (unsigned)raw);
+                }
+                LogInfo << m;
+            }
+            break;
+        case OP_HOST_MANUAL_REMOVE:
+            if (!s_manualOn) {
+                LogError << "calib: error manual-off";
+                break;
+            }
+            if (s_sampling) {
+                LogError << "calib: error manual-busy";
+                break;
+            }
+            if (len < 6) {
+                LogError << "calib: error bad-op";
+                break;
+            }
+            {
+                uint8_t ch = p[1] & 0x03;
+                uint16_t ideal = (uint16_t)(p[2] | (p[3] << 8));
+                uint16_t raw = (uint16_t)(p[4] | (p[5] << 8));
+                uint16_t x = kManualAd ? raw : ideal;
+                uint16_t y = kManualAd ? ideal : raw;
+                int at = -1;
+                for (int i = 0; i < s_manualN[ch]; i++) {
+                    // 按值对删除：索引会随删除/日志丢行漂移，而 (ideal,raw) 由覆盖键保证唯一
+                    if (s_mx[ch][i] == x && s_my[ch][i] == y) {
+                        at = i;
+                        break;
+                    }
+                }
+                if (at < 0) {
+                    LogError << "calib: error bad-point";
+                    break;
+                }
+                for (int i = at; i + 1 < s_manualN[ch]; i++) {
+                    s_mx[ch][i] = s_mx[ch][i + 1];
+                    s_my[ch][i] = s_my[ch][i + 1];
+                }
+                s_manualN[ch]--;
+                s_manualFitted[ch] = false;
+                snprintf(m, sizeof(m), "calib: mdel ch=%u n=%u ideal=%u raw=%u", (unsigned)ch, (unsigned)(at + 1),
+                         (unsigned)ideal, (unsigned)raw);
+                LogInfo << m;
+            }
+            break;
         case OP_HOST_MANUAL_FIT:
             if (!s_manualOn) {
                 LogError << "calib: error manual-off";

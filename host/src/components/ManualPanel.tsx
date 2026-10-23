@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { CalibReport } from "../types";
 import type { CalibParamsCtl } from "../hooks/useCalibParams";
 import * as api from "../lib/ipc";
@@ -9,6 +10,22 @@ const clamp = (v: number) => Math.max(0, Math.min(65535, v));
 
 const MANUAL_MIN_POINTS = 8;
 
+// 每行 `ideal raw` 或 `n ideal raw`；分隔符空格/逗号/分号，# 开头为注释
+function parseImportPoints(text: string) {
+  const points: { ideal: number; raw: number }[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const cols = trimmed.split(/[\s,;]+/).filter(Boolean).map(Number);
+    if (cols.length < 2 || cols.some((v) => !Number.isFinite(v))) continue;
+    const ideal = cols.length >= 3 ? cols[cols.length - 2] : cols[0];
+    const raw = cols.length >= 3 ? cols[cols.length - 1] : cols[1];
+    if (ideal < 0 || ideal > 65535 || raw < 0 || raw > 65535) continue;
+    points.push({ ideal: Math.round(ideal), raw: Math.round(raw) });
+  }
+  return points;
+}
+
 const boardLabel = (dir: string | null) => (dir === "ad" ? "AD 采集板" : dir === "da" ? "DA 输出板" : "?");
 
 export function ManualPanel({ connected, report, ctl }: { connected: boolean; report: CalibReport | null; ctl: CalibParamsCtl }) {
@@ -18,10 +35,34 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
   const [value, setValue] = useState("0");
   const [raw, setRaw] = useState("32768");
   const [error, setError] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importMsg, setImportMsg] = useState<string | null>(null);
 
   const run = (fn: () => Promise<void>) => {
     setError(null);
     fn().catch((e) => setError(String(e)));
+  };
+
+  const loadImportFile = async () => {
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "采样点", extensions: ["txt", "csv", "log"] }],
+    });
+    if (typeof picked === "string") setImportText(await api.readTextFile(picked));
+  };
+
+  const runImport = () => {
+    const points = parseImportPoints(importText);
+    if (points.length === 0) {
+      setImportMsg("未解析到有效点：每行 `ideal raw`（或 `n ideal raw`）");
+      return;
+    }
+    run(async () => {
+      const n = await api.manualImport(ch, points);
+      setImportOpen(false);
+      setImportMsg(`已排队 ${n} 点，串口日志出现 mpt/mrep 即已写入`);
+    });
   };
 
   const manual = report?.manual;
@@ -194,6 +235,43 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
           </div>
         )}
 
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button
+            size="sm"
+            disabled={!ready || samplingCh !== null}
+            onClick={() => {
+              setImportOpen((v) => !v);
+              setImportMsg(null);
+            }}
+          >
+            {importOpen ? "收起导入" : "导入点"}
+          </Button>
+          {importMsg && <span className="text-xs text-ink-soft">{importMsg}</span>}
+        </div>
+
+        {importOpen && (
+          <div className="mt-3 flex flex-col gap-2 rounded-lg border border-line p-3">
+            <div className="text-xs text-ink-faint">
+              每行 <code>ideal raw</code>（也接受 <code>n ideal raw</code>，空格/逗号/分号分隔），导入到 ch{ch}
+              ；与已有同键点合并覆盖（AD 按 ideal、DA 按 raw）。
+            </div>
+            <textarea
+              className="h-32 w-full resize-y rounded-md border border-line-strong bg-field px-2.5 py-2 font-mono text-xs text-ink placeholder:text-ink-faint focus:border-accent focus:bg-panel focus:outline-none"
+              value={importText}
+              onChange={(e) => setImportText(e.currentTarget.value)}
+              placeholder={"ideal raw\n0 0\n1000 998\n..."}
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" onClick={() => run(loadImportFile)}>
+                从文件载入
+              </Button>
+              <Button size="sm" variant="primary" disabled={!importText.trim()} onClick={runImport}>
+                导入到 ch{ch}
+              </Button>
+            </div>
+          </div>
+        )}
+
         {replaced && (
           <div className="mt-2 text-xs text-warn-ink">
             {boardDir === "ad"
@@ -262,6 +340,7 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
                   <th className="px-3 py-2 text-left font-medium whitespace-nowrap">n</th>
                   <th className="px-3 py-2 text-left font-medium whitespace-nowrap">ideal</th>
                   <th className="px-3 py-2 text-left font-medium whitespace-nowrap">raw</th>
+                  <th className="px-3 py-2" />
                 </tr>
               </thead>
               <tbody>
@@ -270,6 +349,16 @@ export function ManualPanel({ connected, report, ctl }: { connected: boolean; re
                     <td className="px-3 py-2">{p.n}</td>
                     <td className="px-3 py-2">{p.ideal}</td>
                     <td className="px-3 py-2">{p.raw}</td>
+                    <td className="px-3 py-1 text-right">
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        disabled={!ready || samplingCh !== null}
+                        onClick={() => run(() => api.manualRemove(ch, p.ideal, p.raw))}
+                      >
+                        删除
+                      </Button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -16,6 +16,7 @@ use crate::calib::Parser;
 
 pub const MAX_LINES: usize = 5000;
 const PENDING_MAX: usize = 4096;
+const CMD_BYTES_PER_ITER: usize = 24;
 const ATTACH_MAX_TRIES: u32 = 40;
 const PROBE_LOST_HINT: &str = "重新插好 J-Link 后点『连接』重建会话（拔插时会话已释放，不会占用探针）";
 // 控制块只在固件 startup 由 .data 拷贝写进 SRAM：目标若被停机在复位态，SRAM 里没有
@@ -353,14 +354,17 @@ fn read_loop(
         }
         // down_channel/up_channel 均为 &mut self，不能同时持有，故每轮分别借用
         if let Some(down) = rtt.down_channel(0) {
-            loop {
+            // RTT 下行环只有 256B、固件每 1ms 最多取 64B：成批导入点这类命令一次灌完会溢出丢帧
+            let mut budget = CMD_BYTES_PER_ITER;
+            while budget > 0 {
                 let frame = { commands.lock().pop_front() };
-                match frame {
-                    Some(f) => {
-                        down.write(core, &f).map_err(|e| ReadStop::Failed(e.to_string()))?;
-                    }
-                    None => break,
+                let Some(f) = frame else { break };
+                let n = down.write(core, &f).map_err(|e| ReadStop::Failed(e.to_string()))?;
+                if n < f.len() {
+                    commands.lock().push_front(f[n..].to_vec());
+                    break;
                 }
+                budget -= f.len();
             }
         }
         let channel = match rtt.up_channel(0) {

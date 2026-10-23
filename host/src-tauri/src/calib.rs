@@ -163,6 +163,8 @@ static MPT_RE: LazyLock<Regex> =
 static MREP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^mrep ch=(\d+) n=(\d+) old=(\d+) ideal=(\d+) raw=(\d+)$").unwrap()
 });
+static MDEL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^mdel ch=(\d+) n=(\d+) ideal=(\d+) raw=(\d+)$").unwrap());
 static MSAMPLE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^msample ch=(\d+) ideal=(\d+)$").unwrap());
 static MSET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^mset ch=(\d+) raw=(\d+)$").unwrap());
@@ -499,6 +501,36 @@ impl Parser {
             self.report.phase = "manual".to_string();
             return true;
         }
+        if let Some(c) = MDEL_RE.captures(rest) {
+            let ch = parse_u16(&c[1]) as usize;
+            let n = parse_u16(&c[2]) as usize;
+            let ideal = parse_u16(&c[3]);
+            let raw = parse_u16(&c[4]);
+            if ch < CHANNELS {
+                let mc = &mut self.report.manual.channels[ch];
+                let at = mc
+                    .points
+                    .iter()
+                    .position(|p| p.ideal == ideal && p.raw == raw)
+                    .or_else(|| mc.points.iter().position(|p| p.n == n));
+                if let Some(at) = at {
+                    mc.points.remove(at);
+                }
+                for (i, p) in mc.points.iter_mut().enumerate() {
+                    p.n = i + 1;
+                }
+                mc.fitted = false;
+                mc.coeff = None;
+                mc.resid = None;
+                mc.verify = None;
+                mc.pending_raw = None;
+            }
+            self.report.manual.last_replace = None;
+            self.report.manual.saved = false;
+            self.report.manual.verify_pass = None;
+            self.report.phase = "manual".to_string();
+            return true;
+        }
         if let Some(c) = MRES_RE.captures(rest) {
             let ch = parse_u16(&c[1]) as usize;
             if ch < CHANNELS {
@@ -578,7 +610,7 @@ impl Parser {
                 return true;
             }
         }
-        if rest == "error bad-op" && self.report.role.as_deref() == Some("MANUAL") {
+        if (rest == "error bad-op" || rest == "error bad-point") && self.report.role.as_deref() == Some("MANUAL") {
             self.report.manual.errors.push(rest.to_string());
             return true;
         }
@@ -1367,6 +1399,26 @@ mod tests {
         assert_eq!(c.points[0].raw, 950);
         assert_eq!(m.sampling_ch, None);
         assert_eq!(m.last_replace.as_ref().unwrap().old, 900);
+    }
+
+    #[test]
+    fn manual_delete_removes_and_renumbers() {
+        let mut parser = Parser::new();
+        parser.feed("calib: mbegin");
+        parser.feed("calib: mpt ch=0 n=1 ideal=0 raw=0");
+        parser.feed("calib: mpt ch=0 n=2 ideal=1000 raw=900");
+        parser.feed("calib: mpt ch=0 n=3 ideal=2000 raw=1900");
+        parser.feed("calib: mres ch=0 n=3 max=0.5 @ideal=1000 rmse=0.3");
+        assert!(parser.feed("calib: mdel ch=0 n=2 ideal=1000 raw=900"));
+        let c = &parser.report.manual.channels[0];
+        assert_eq!(c.points.len(), 2);
+        assert_eq!(c.points[0].ideal, 0);
+        assert_eq!(c.points[1].ideal, 2000);
+        assert_eq!(c.points[1].n, 2);
+        assert!(!c.fitted);
+        assert!(c.coeff.is_none());
+        assert!(c.resid.is_none());
+        assert_eq!(parser.report.phase, "manual");
     }
 
     #[test]

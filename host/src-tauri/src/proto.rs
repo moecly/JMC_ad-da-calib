@@ -19,6 +19,8 @@ pub const OP_HOST_MANUAL_SET_RAW: u8 = 0x22;
 pub const OP_HOST_MANUAL_ADD: u8 = 0x23;
 pub const OP_HOST_MANUAL_FIT: u8 = 0x24;
 pub const OP_HOST_MANUAL_SAVE: u8 = 0x25;
+pub const OP_HOST_MANUAL_IMPORT: u8 = 0x26;
+pub const OP_HOST_MANUAL_REMOVE: u8 = 0x27;
 
 const FRAME_HEAD: u8 = 0xA5;
 const MAX_PAYLOAD: usize = 26;
@@ -145,6 +147,28 @@ pub fn manual_save() -> Vec<u8> {
     frame(&[OP_HOST_MANUAL_SAVE])
 }
 
+pub fn manual_import(ch: u8, ideal: u16, raw: u16) -> Vec<u8> {
+    frame(&[
+        OP_HOST_MANUAL_IMPORT,
+        ch & 0x03,
+        (ideal & 0xFF) as u8,
+        (ideal >> 8) as u8,
+        (raw & 0xFF) as u8,
+        (raw >> 8) as u8,
+    ])
+}
+
+pub fn manual_remove(ch: u8, ideal: u16, raw: u16) -> Vec<u8> {
+    frame(&[
+        OP_HOST_MANUAL_REMOVE,
+        ch & 0x03,
+        (ideal & 0xFF) as u8,
+        (ideal >> 8) as u8,
+        (raw & 0xFF) as u8,
+        (raw >> 8) as u8,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +193,14 @@ mod tests {
         assert_eq!(&manual_set_raw(2, 40000)[2..6], &[0x22, 2, 0x40, 0x9C]);
         assert_eq!(&manual_add(0, 65535)[2..6], &[0x23, 0, 0xFF, 0xFF]);
         assert_eq!(&manual_fit()[2..3], &[0x24]);
+        assert_eq!(
+            &manual_import(3, 0x1234, 0xABCD)[2..8],
+            &[OP_HOST_MANUAL_IMPORT, 3, 0x34, 0x12, 0xCD, 0xAB]
+        );
+        assert_eq!(
+            &manual_remove(2, 0x0102, 0x0304)[2..8],
+            &[OP_HOST_MANUAL_REMOVE, 2, 0x02, 0x01, 0x04, 0x03]
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use calib::{CalibReport, Parser};
@@ -320,6 +320,43 @@ fn manual_save(state: State<AppState>) -> Result<(), String> {
     push_command(&state, proto::manual_save())
 }
 
+#[derive(Deserialize)]
+struct PointInput {
+    ideal: u16,
+    raw: u16,
+}
+
+#[tauri::command]
+fn manual_import(state: State<AppState>, ch: u8, points: Vec<PointInput>) -> Result<usize, String> {
+    let connected = state
+        .conn
+        .lock()
+        .as_ref()
+        .map(|(h, _)| !h.is_finished())
+        .unwrap_or(false);
+    if !connected {
+        return Err("未连接".to_string());
+    }
+    let ch = ch & 0x03;
+    {
+        let mut q = state.commands.lock();
+        for p in &points {
+            q.push_back(proto::manual_import(ch, p.ideal, p.raw));
+        }
+    }
+    Ok(points.len())
+}
+
+#[tauri::command]
+fn manual_remove(state: State<AppState>, ch: u8, ideal: u16, raw: u16) -> Result<(), String> {
+    push_command(&state, proto::manual_remove(ch, ideal, raw))
+}
+
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -349,7 +386,10 @@ pub fn run() {
             manual_set_raw,
             manual_add,
             manual_fit,
-            manual_save
+            manual_save,
+            manual_import,
+            manual_remove,
+            read_text_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -31,6 +31,11 @@ export const manualSetRaw = (ch: number, raw: number) => invoke<void>("manual_se
 export const manualAdd = (ch: number, ideal: number) => invoke<void>("manual_add", { ch, ideal });
 export const manualFit = () => invoke<void>("manual_fit");
 export const manualSave = () => invoke<void>("manual_save");
+export const manualImport = (ch: number, points: { ideal: number; raw: number }[]) =>
+  invoke<number>("manual_import", { ch, points });
+export const manualRemove = (ch: number, ideal: number, raw: number) =>
+  invoke<void>("manual_remove", { ch, ideal, raw });
+export const readTextFile = (path: string) => invoke<string>("read_text_file", { path });
 
 export const onLine = (cb: (line: LogLine) => void): Promise<UnlistenFn> =>
   listen<LogLine>("rtt://line", (e) => cb(e.payload));
